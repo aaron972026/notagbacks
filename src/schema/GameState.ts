@@ -44,6 +44,7 @@ export class Item extends Schema {
 
 export class GameState extends Schema {
   @type("string") code = ""; // short room code players join by
+  @type("string") roomName = ""; // optional custom room display name (host-set)
   @type("string") phase: Phase = Phase.LOBBY;
   @type("number") timeLeft = 0; // seconds remaining in the current timed phase
   @type("string") outcome = ""; // "" | "hunter" | "searchers" — set when the round ends
@@ -60,6 +61,7 @@ export class GameState extends Schema {
   @type("string") hunterMode: HunterMode = HunterMode.ROTATE; // pick | rotate
   @type("boolean") hiddenHunter = true; // conceal the Hunter until blackout
   @type("boolean") traitorMode = false; // one searcher is secretly on the Hunter's side
+  @type("boolean") axeThrows = false; // host setting: Hunter can throw axes (50/50, 5s recharge)
   @type("string") pickedHunterId = ""; // chosen hunter when hunterMode = pick
   // Host-adjustable per-game timings (seconds).
   @type("number") hideTime: number = CONFIG.HIDE_PHASE_S;

@@ -49,7 +49,10 @@ export const CONFIG = {
 
   // ---- Combat ----
   MELEE_RANGE: 2, // forward raycast kill range for the hunter
-  AXE_THROWS: 3, // total axe projectiles the hunter gets
+  // Axe throw (optional, host-toggled): a long-range gamble — wildly inaccurate.
+  AXE_RANGE: 9, // how far an axe can reach a target
+  AXE_HIT_CHANCE: 0.5, // very inaccurate — 50/50 to eliminate even with a target lined up
+  AXE_COOLDOWN_S: 5, // recharge between throws
 
   // ---- Flashlight ----
   FLASHLIGHT_BATTERY_S: 0, // 0 = unlimited; otherwise seconds of charge

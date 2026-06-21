@@ -63,6 +63,7 @@ export class BlackoutRoom extends Room<GameState> {
   private solo = true;
   /** Per-hunter melee cooldown timestamps. */
   private lastMelee = new Map<string, number>();
+  private lastAxe = new Map<string, number>();
   /** Items the human Hunter still needs to place during HIDE (MP). */
   private pending: Array<{ id: string; kind: string; x: number; z: number }> = [];
   /** When each locked door auto-reopens (epoch ms). */
@@ -128,6 +129,20 @@ export class BlackoutRoom extends Room<GameState> {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
       this.state.traitorMode = !!msg?.value;
     });
+    this.onMessage("setAxeThrows", (client, msg: { value?: boolean }) => {
+      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
+      this.state.axeThrows = !!msg?.value;
+    });
+    this.onMessage("setName", (client, msg: { name?: string }) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      const n = (msg?.name ?? "").trim().slice(0, 16);
+      if (n) p.name = n; // ignore blanks so a player keeps a usable name
+    });
+    this.onMessage("setRoomName", (client, msg: { name?: string }) => {
+      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
+      this.state.roomName = (msg?.name ?? "").trim().slice(0, 24);
+    });
     this.onMessage("traitorPing", (client) => {
       if (this.roles.get(client.sessionId) !== Role.TRAITOR) return;
       const p = this.state.players.get(client.sessionId);
@@ -168,6 +183,7 @@ export class BlackoutRoom extends Room<GameState> {
     });
 
     this.onMessage("melee", (client) => this.handleMelee(client));
+    this.onMessage("throwAxe", (client) => this.handleAxe(client));
     this.onMessage("sabotage", (client, msg: { kind?: string }) => this.handleSabotage(client, msg?.kind));
     this.onMessage("emote", (client, msg: { emoji?: string }) => {
       const e = msg?.emoji;
@@ -265,6 +281,7 @@ export class BlackoutRoom extends Room<GameState> {
     this.lastMoveAt.delete(client.sessionId);
     this.running.delete(client.sessionId);
     this.lastMelee.delete(client.sessionId);
+    this.lastAxe.delete(client.sessionId);
     this.voiceOn.delete(client.sessionId);
     this.lastTroll.delete(client.sessionId);
     this.roles.delete(client.sessionId);
@@ -718,6 +735,40 @@ export class BlackoutRoom extends Room<GameState> {
       best = p;
     });
     if (best) this.onCatch(best.id);
+  }
+
+  // Optional axe throw: long-range but wildly inaccurate — even with a searcher
+  // lined up it's a coin flip, on a 5s recharge. Host-toggled via state.axeThrows.
+  private handleAxe(client: Client) {
+    if (!this.state.axeThrows) return;
+    if (this.roles.get(client.sessionId) !== Role.HUNTER) return;
+    const ph = this.state.phase;
+    if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
+    const h = this.state.players.get(client.sessionId);
+    if (!h) return;
+    const now = Date.now();
+    if (now - (this.lastAxe.get(client.sessionId) ?? 0) < CONFIG.AXE_COOLDOWN_S * 1000) return;
+    this.lastAxe.set(client.sessionId, now);
+
+    // Acquire the nearest searcher in the throw arc.
+    let best: Player | undefined;
+    let bestD: number = CONFIG.AXE_RANGE;
+    this.state.players.forEach((p) => {
+      if (this.roles.get(p.id) !== Role.SEARCHER) return;
+      if (p.downed || p.escaped || p.hidden) return;
+      const dx = p.x - h.x;
+      const dz = p.z - h.z;
+      const d = Math.hypot(dx, dz);
+      if (d > bestD) return;
+      const toAng = Math.atan2(-dx, -dz);
+      if (Math.abs(angleDiff(h.ry, toAng)) > Math.PI * 0.5) return; // ~front arc
+      bestD = d;
+      best = p;
+    });
+
+    const hit = !!best && Math.random() < CONFIG.AXE_HIT_CHANCE; // 50/50
+    if (hit && best) this.onCatch(best.id); // checkRoundEnd runs on the next tick
+    client.send("axe", { hit, hadTarget: !!best });
   }
 
   private tryDeposit(player: Player) {
