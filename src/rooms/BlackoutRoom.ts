@@ -143,6 +143,18 @@ export class BlackoutRoom extends Room<GameState> {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
       this.state.roomName = (msg?.name ?? "").trim().slice(0, 24);
     });
+    // Searcher whistle taunt → reveal their spot to the Hunter for 5s + everyone hears it.
+    this.onMessage("whistle", (client) => {
+      if (this.roles.get(client.sessionId) === Role.HUNTER) return;
+      const ph = this.state.phase;
+      if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
+      const p = this.state.players.get(client.sessionId);
+      if (!p || p.downed || p.escaped) return;
+      this.clients
+        .find((c) => this.roles.get(c.sessionId) === Role.HUNTER)
+        ?.send("ping", { x: p.x, z: p.z });
+      this.broadcast("whistle", {}, { except: client });
+    });
     this.onMessage("traitorPing", (client) => {
       if (this.roles.get(client.sessionId) !== Role.TRAITOR) return;
       const p = this.state.players.get(client.sessionId);
@@ -204,6 +216,26 @@ export class BlackoutRoom extends Room<GameState> {
       if (!isFiniteNum(msg?.x) || !isFiniteNum(msg?.z)) return;
       const next = this.pending.shift()!;
       this.addItem(next.id, next.kind, clamp(msg.x!, -HALF_W, HALF_W), clamp(msg.z!, -HALF_D, HALF_D));
+      this.sendPlacement(client);
+    });
+    // Hunter picks a placed item back up during HIDE to reposition it.
+    this.onMessage("pickUpItem", (client, msg: { x?: number; z?: number }) => {
+      if (this.roles.get(client.sessionId) !== Role.HUNTER) return;
+      if (this.state.phase !== Phase.HIDE) return;
+      if (!isFiniteNum(msg?.x) || !isFiniteNum(msg?.z)) return;
+      let best: Item | undefined;
+      let bestD = 3; // grab the placed item nearest your aim point
+      this.state.items.forEach((it) => {
+        if (it.deposited || it.carriedBy) return;
+        const d = Math.hypot(it.x - msg.x!, it.z - msg.z!);
+        if (d < bestD) {
+          bestD = d;
+          best = it;
+        }
+      });
+      if (!best) return;
+      this.state.items.delete(best.id);
+      this.pending.unshift({ id: best.id, kind: best.kind, x: best.x, z: best.z }); // re-place next
       this.sendPlacement(client);
     });
     this.onMessage("pickup", (client, msg: { itemId?: string }) => {
