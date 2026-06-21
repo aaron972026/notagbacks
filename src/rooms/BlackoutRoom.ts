@@ -393,16 +393,18 @@ export class BlackoutRoom extends Room<GameState> {
       this.clients.find((c) => c.sessionId === hunterId)?.send("traitor", { id: traitorId });
     }
 
-    // Flashlights = (non-hunter players) - 1; the traitor blends in with a light too.
     const searcherCount = ids.filter((id) => this.roles.get(id) !== Role.HUNTER).length;
     this.state.items.clear();
-    const loot = this.buildLoot(searcherCount);
+    // Flashlights: one per searcher, ALWAYS auto-placed in view of the spawn
+    // (never Hunter-placed) so everyone can grab a light.
+    this.placeFlashlights(searcherCount);
+    // The rest (required items + golden brick): solo auto-places; multiplayer has
+    // the Hunter place it during HIDE.
+    const loot = this.buildLoot();
     if (this.solo) {
-      // No human Hunter — auto-place everything immediately.
       for (const l of loot) this.addItem(l.id, l.kind, l.x, l.z);
       this.pending = [];
     } else {
-      // The human Hunter places these during HIDE (auto-placed if time runs out).
       this.pending = loot;
       const hunterClient = this.clients.find((c) => this.roles.get(c.sessionId) === Role.HUNTER);
       if (hunterClient) this.sendPlacement(hunterClient);
@@ -529,20 +531,25 @@ export class BlackoutRoom extends Room<GameState> {
     console.log(`[BlackoutRoom] round over — ${outcome} win`);
   }
 
-  /** The full loot set (required items, flashlights, golden brick) with default spots. */
-  private buildLoot(searcherCount: number): Array<{ id: string; kind: string; x: number; z: number }> {
+  /** Hunter-/auto-placed loot: required items + golden brick (NOT flashlights). */
+  private buildLoot(): Array<{ id: string; kind: string; x: number; z: number }> {
     const m = DEFAULT_MAP;
     const list: Array<{ id: string; kind: string; x: number; z: number }> = [];
     for (const l of m.requiredLoot) list.push({ id: l.id, kind: l.id, x: l.x, z: l.z });
-    // Scarcity is the gamble, but never zero — a 2-player game (1 searcher) still
-    // gets a light. Bigger lobbies stay one short of the searcher count.
-    const flCount = this.solo ? 1 : Math.max(1, searcherCount - 1);
-    for (let i = 0; i < flCount && i < m.flashlightAnchors.length; i++) {
-      const a = m.flashlightAnchors[i];
-      list.push({ id: `flashlight_${i}`, kind: "flashlight", x: a.x, z: a.z });
-    }
     list.push({ id: "golden_brick", kind: "golden_brick", x: m.goldenBrick.x, z: m.goldenBrick.z });
     return list;
+  }
+
+  /** One flashlight per searcher, clustered at the lobby spawn points (in view). */
+  private placeFlashlights(count: number) {
+    const spawns = DEFAULT_MAP.searcherSpawns;
+    for (let i = 0; i < Math.max(1, count); i++) {
+      const s = spawns[i % spawns.length];
+      const ring = Math.floor(i / spawns.length); // extra rows if >spawns players
+      const x = s.x + (ring ? (i % 2 ? 1.3 : -1.3) : 0);
+      const z = s.z + ring * 1.3;
+      this.addItem(`flashlight_${i}`, "flashlight", x, z);
+    }
   }
 
   private addItem(id: string, kind: string, x: number, z: number) {
