@@ -1,0 +1,9 @@
+node_modules/
+build/
+dist/
+*.log
+.env
+.env.*
+
+# Colyseus Cloud deploy credentials — contains a deploy token, never commit
+.colyseus-cloud.json
