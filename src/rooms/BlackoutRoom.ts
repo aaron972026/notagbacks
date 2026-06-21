@@ -649,21 +649,28 @@ export class BlackoutRoom extends Room<GameState> {
     if (now - (this.lastSab.get(cdKey) ?? -1e9) < cd * 1000) return;
 
     if (kind === "door") {
+      // Slam the door the Hunter is FACING (not merely the nearest one):
+      // facing alignment dominates, distance only breaks ties.
       let best: DoorGap | undefined;
-      let bestD = 9; // can slam a door within 9m
+      let bestScore = Infinity;
       for (const d of DEFAULT_MAP.doors) {
         if (this.state.lockedDoors.includes(d.id)) continue;
         if (!this.canLock(d)) continue; // never seal a room off completely
         const px = d.axis === "v" ? d.line : d.center;
         const pz = d.axis === "v" ? d.center : d.line;
         const dist = Math.hypot(px - h.x, pz - h.z);
-        if (dist < bestD) {
-          bestD = dist;
+        if (dist > 11) continue; // within reach
+        const toAng = Math.atan2(-(px - h.x), -(pz - h.z));
+        const ang = Math.abs(angleDiff(h.ry, toAng));
+        if (ang > 1.2) continue; // must be roughly in front of you
+        const score = ang + dist * 0.06;
+        if (score < bestScore) {
+          bestScore = score;
           best = d;
         }
       }
       if (!best) {
-        client.send("sab", { kind, fail: "No door to slam here" });
+        client.send("sab", { kind, fail: "Face a door to slam it" });
         return; // don't start the cooldown
       }
       this.state.lockedDoors.push(best.id);
