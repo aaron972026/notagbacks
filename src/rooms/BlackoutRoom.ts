@@ -502,7 +502,9 @@ export class BlackoutRoom extends Room<GameState> {
     const m = DEFAULT_MAP;
     const list: Array<{ id: string; kind: string; x: number; z: number }> = [];
     for (const l of m.requiredLoot) list.push({ id: l.id, kind: l.id, x: l.x, z: l.z });
-    const flCount = this.solo ? 1 : Math.max(0, searcherCount - 1);
+    // Scarcity is the gamble, but never zero — a 2-player game (1 searcher) still
+    // gets a light. Bigger lobbies stay one short of the searcher count.
+    const flCount = this.solo ? 1 : Math.max(1, searcherCount - 1);
     for (let i = 0; i < flCount && i < m.flashlightAnchors.length; i++) {
       const a = m.flashlightAnchors[i];
       list.push({ id: `flashlight_${i}`, kind: "flashlight", x: a.x, z: a.z });
