@@ -117,6 +117,10 @@ for (const [id, x1, z1, x2, z2] of ROOMS_JSON) {
   ROOMS.set(id, { id, x1: wx(x1), z1: wz(z1), x2: wx(x2), z2: wz(z2) });
 }
 
+/** Room rectangles in WORLD coords — used by the client to place decor per-room. */
+export type RoomRect = Rect;
+export const ROOM_RECTS: RoomRect[] = Array.from(ROOMS.values());
+
 // Doors: pairs of room ids that have a passable opening between them.
 //
 // NOTE: several doors in the source JSON connect rooms whose rectangles don't

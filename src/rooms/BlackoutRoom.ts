@@ -3,7 +3,14 @@ import { CONFIG, Phase, Role, HunterMode, REQUIRED_ITEM_KINDS, ItemKind } from "
 import { DEFAULT_MAP, type DoorGap } from "../shared/map";
 
 const DOOR_LOCK_S = 45; // how long a slammed door stays locked, then it reopens
-const KILL_LIGHTS_S = 10; // duration of the total kill-the-lights blackout
+const KILL_LIGHTS_S = 8; // duration of the total kill-the-lights blackout (also kills flashlights)
+
+// Caretaker taunts (Hunter-triggered radial wheel). Index → sound bank id; the
+// client sends an index, the server maps it (never trusts a client soundId).
+const TAUNT_SOUNDS = ["taunt_dangerous", "taunt_smell", "taunt_comeout", "taunt_quiet", "taunt_why", "sting_no"];
+const TAUNT_COOLDOWN_MS = 2500;
+const STING_THROTTLE_MS = 700; // min gap between sting_no events
+const ROAR_THROTTLE_MS = 4000; // min gap between alert_roar events
 
 // Silly default names — comedy in the bones.
 const NAME_ADJ = ["Sweaty", "Doomed", "Nervous", "Clumsy", "Spooky", "Hapless", "Jumpy", "Cursed", "Soggy", "Frantic", "Wobbly", "Greasy", "Anxious", "Twitchy"];
@@ -70,6 +77,13 @@ export class BlackoutRoom extends Room<GameState> {
   private doorExpiry = new Map<string, number>();
   /** Last use timestamp per sabotage kind (for cooldowns). */
   private lastSab = new Map<string, number>();
+  /** Last taunt timestamp per player (Caretaker taunt cooldown). */
+  private lastTaunt = new Map<string, number>();
+  /** Throttles for the automatic contextual stings. */
+  private lastSting = 0;
+  private lastRoar = 0;
+  /** Previous AI state, to detect the Caretaker FIRST spotting a searcher. */
+  private prevAiState = "idle";
   /** roomId → its doorway ids (for the never-fully-seal-a-room rule). */
   private roomDoors = new Map<string, string[]>();
   /** session ids with proximity voice enabled. */
@@ -196,6 +210,7 @@ export class BlackoutRoom extends Room<GameState> {
 
     this.onMessage("melee", (client) => this.handleMelee(client));
     this.onMessage("throwAxe", (client) => this.handleAxe(client));
+    this.onMessage("taunt", (client, msg: { index?: number }) => this.handleTaunt(client, msg?.index));
     this.onMessage("sabotage", (client, msg: { kind?: string }) => this.handleSabotage(client, msg?.kind));
     this.onMessage("emote", (client, msg: { emoji?: string }) => {
       const e = msg?.emoji;
@@ -430,6 +445,15 @@ export class BlackoutRoom extends Room<GameState> {
    *  - "blackout": Hunter revealed (renders as the Caretaker); Traitor still concealed.
    *  - "end":      everything revealed — the "IT WAS YOU?!" moment.
    */
+  /** Hide/show the Hunter's avatar for everyone (used to make the frozen
+   *  lights-on Caretaker invisible). The local Hunter is first-person, so this
+   *  only affects how OTHER clients render them. */
+  private setHunterHidden(v: boolean) {
+    this.state.players.forEach((p, id) => {
+      if (this.roles.get(id) === Role.HUNTER) p.hidden = v;
+    });
+  }
+
   private applyRoles(stage: "start" | "blackout" | "end") {
     this.state.players.forEach((p, id) => {
       const actual = this.roles.get(id) ?? Role.SEARCHER;
@@ -463,9 +487,13 @@ export class BlackoutRoom extends Room<GameState> {
       this.autoPlaceRemaining(); // anything the Hunter didn't place lands on defaults
       s.phase = Phase.LIGHTS_ON;
       s.timeLeft = s.lightsOnTime;
+      // The Caretaker is frozen with the lights on — make it invisible to the
+      // searchers entirely (its avatar hides; identity isn't leaked).
+      this.setHunterHidden(true);
     } else if (s.phase === Phase.LIGHTS_ON) {
       s.phase = Phase.BLACKOUT;
       s.timeLeft = s.roundTime;
+      this.setHunterHidden(false); // the hunt begins — the Caretaker reappears
       this.applyRoles("blackout"); // the Hunter's identity is exposed at blackout
     } else if (s.phase === Phase.BLACKOUT) {
       s.phase = Phase.ENDED; // timed out — survivors who didn't escape are stuck
@@ -492,6 +520,16 @@ export class BlackoutRoom extends Room<GameState> {
       if (this.solo) {
         if (!s.caretaker.active) this.ai.activate(s, DEFAULT_MAP.hunterSpawn);
         this.ai.update(dt, s, (id) => this.isRunning(id), (id) => this.onCatch(id));
+        // First sighting: the Caretaker roars when it acquires a target (a
+        // transition into chase/attack from a calmer state). Throttled.
+        const now = Date.now();
+        const alerted = s.caretaker.aiState === "chase" || s.caretaker.aiState === "attack";
+        const wasCalm = this.prevAiState !== "chase" && this.prevAiState !== "attack";
+        if (alerted && wasCalm && now - this.lastRoar > ROAR_THROTTLE_MS) {
+          this.lastRoar = now;
+          this.emitSting("alert_roar", { x: s.caretaker.x, z: s.caretaker.z });
+        }
+        this.prevAiState = s.caretaker.aiState;
       }
       this.checkRoundEnd(); // resolves caught / escaped outcomes
     } else if (s.caretaker.active) {
@@ -503,6 +541,9 @@ export class BlackoutRoom extends Room<GameState> {
   private onCatch(id: string) {
     const p = this.state.players.get(id);
     if (!p || p.downed || p.escaped) return;
+    // The Caretaker landed an attack — it roars (positional, heard by all).
+    this.lastRoar = Date.now();
+    this.emitSting("alert_roar", { x: p.x, z: p.z });
     let brick: Item | undefined;
     this.state.items.forEach((it) => {
       if (it.carriedBy === id && it.kind === "golden_brick") brick = it;
@@ -658,30 +699,25 @@ export class BlackoutRoom extends Room<GameState> {
       if (this.state.doorsOpen && !player.escaped && inZone(player.x, player.z, EXIT)) {
         player.escaped = true;
         console.log(`[BlackoutRoom] ${player.name} escaped!`);
+        this.maybeStingNo({ x: player.x, z: player.z }); // the Caretaker's frustrated "no"
         this.checkRoundEnd();
       }
     }
   }
 
-  /** Sabotage: Hunter (all) or Traitor (door/scare only). */
+  /** Sabotage: Hunter (door + lights) or Traitor (door only). Scare was replaced
+   *  by the Caretaker taunt wheel. */
   private handleSabotage(client: Client, kind?: string) {
     const role = this.roles.get(client.sessionId);
     const isHunter = role === Role.HUNTER;
     const isTraitor = role === Role.TRAITOR;
     if (!isHunter && !isTraitor) return;
-    if (isTraitor && kind === "lights") return; // traitor gets light sabotage only
+    if (isTraitor && kind === "lights") return; // traitor: door only
     const ph = this.state.phase;
     if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
     const h = this.state.players.get(client.sessionId);
     if (!h) return;
-    const cd =
-      kind === "door"
-        ? CONFIG.HUNTER_DOOR_LOCK_CD_S
-        : kind === "lights"
-          ? CONFIG.HUNTER_BLACKOUT_CD_S
-          : kind === "scare"
-            ? CONFIG.HUNTER_SCARE_CD_S
-            : 0;
+    const cd = kind === "door" ? CONFIG.HUNTER_DOOR_LOCK_CD_S : kind === "lights" ? CONFIG.HUNTER_BLACKOUT_CD_S : 0;
     if (!cd) return;
     const now = Date.now();
     const cdKey = `${client.sessionId}:${kind}`;
@@ -714,14 +750,12 @@ export class BlackoutRoom extends Room<GameState> {
       }
       this.state.lockedDoors.push(best.id);
       this.doorExpiry.set(best.id, now + DOOR_LOCK_S * 1000);
+      // MP-consistent world sound: every client hears the slam at the door.
+      const dpx = best.axis === "v" ? best.line : best.center;
+      const dpz = best.axis === "v" ? best.center : best.line;
+      this.broadcast("sound", { soundId: "door_slam", x: dpx, z: dpz });
     } else if (kind === "lights") {
       this.state.lightsOutFor = KILL_LIGHTS_S;
-    } else if (kind === "scare") {
-      for (const c of this.clients) {
-        if (c.sessionId !== client.sessionId && this.roles.get(c.sessionId) !== Role.HUNTER) {
-          c.send("scare");
-        }
-      }
     }
     this.lastSab.set(cdKey, now);
     client.send("sab", { kind }); // confirm → starts the client cooldown
@@ -758,6 +792,48 @@ export class BlackoutRoom extends Room<GameState> {
   }
 
   /** Human Hunter melee: down the nearest searcher in front, within range. */
+  /** Where the Caretaker currently "is" for positional sounds: the AI in solo,
+   *  else the human Hunter's position. Null if neither is available. */
+  private caretakerPos(): { x: number; z: number } | null {
+    if (this.solo && this.state.caretaker.active) {
+      return { x: this.state.caretaker.x, z: this.state.caretaker.z };
+    }
+    const hunter = this.clients.find((c) => this.roles.get(c.sessionId) === Role.HUNTER);
+    const h = hunter && this.state.players.get(hunter.sessionId);
+    return h ? { x: h.x, z: h.z } : null;
+  }
+
+  /** A canned Caretaker sting, broadcast positionally to every client. NOT routed
+   *  through the WebRTC voice mesh — it's a clip, not live mic. */
+  private emitSting(soundId: string, pos: { x: number; z: number } | null) {
+    if (!pos) return;
+    this.broadcast("sound", { soundId, x: pos.x, z: pos.z });
+  }
+
+  /** sting_no on survivor progress (escape / deposit), throttled against spam. */
+  private maybeStingNo(pos: { x: number; z: number }) {
+    const now = Date.now();
+    if (now - this.lastSting < STING_THROTTLE_MS) return;
+    this.lastSting = now;
+    this.emitSting("sting_no", pos);
+  }
+
+  /** Hunter-only Caretaker taunt: validate role/phase/index, enforce the per-
+   *  player cooldown, then broadcast a positional sound at the Hunter. */
+  private handleTaunt(client: Client, index?: number) {
+    if (this.roles.get(client.sessionId) !== Role.HUNTER) return;
+    const ph = this.state.phase;
+    if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return; // only during the hunt
+    const i = Math.floor(Number(index));
+    if (!(i >= 0 && i < TAUNT_SOUNDS.length)) return;
+    const h = this.state.players.get(client.sessionId);
+    if (!h) return;
+    const now = Date.now();
+    if (now - (this.lastTaunt.get(client.sessionId) ?? 0) < TAUNT_COOLDOWN_MS) return;
+    this.lastTaunt.set(client.sessionId, now);
+    this.broadcast("sound", { soundId: TAUNT_SOUNDS[i], x: h.x, z: h.z });
+  }
+
   private handleMelee(client: Client) {
     if (this.roles.get(client.sessionId) !== Role.HUNTER) return;
     const ph = this.state.phase;
@@ -817,6 +893,8 @@ export class BlackoutRoom extends Room<GameState> {
     const hit = !!best && Math.random() < CONFIG.AXE_HIT_CHANCE; // 50/50
     if (hit && best) this.onCatch(best.id); // checkRoundEnd runs on the next tick
     client.send("axe", { hit, hadTarget: !!best });
+    // MP-consistent world sound: the whoosh/thud at the thrower's position.
+    this.broadcast("sound", { soundId: "axe", x: h.x, z: h.z });
   }
 
   private tryDeposit(player: Player) {
@@ -838,9 +916,12 @@ export class BlackoutRoom extends Room<GameState> {
       if (it.deposited && REQUIRED_ITEM_KINDS.includes(it.kind as ItemKind)) d++;
     });
     this.state.deposited = d;
+    this.maybeStingNo({ x: PAD.x, z: PAD.z }); // progress against the Caretaker → "no"
     if (d >= CONFIG.REQUIRED_ITEMS && !this.state.doorsOpen) {
       this.state.doorsOpen = true;
       console.log(`[BlackoutRoom] all items deposited — front doors unlocked`);
+      // MP-consistent world sound: the front doors unlocking, heard by everyone.
+      this.broadcast("sound", { soundId: "door_unlock", x: PAD.x, z: PAD.z });
     }
   }
 
