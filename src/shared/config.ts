@@ -70,6 +70,19 @@ export const CONFIG = {
   HUNTER_BLACKOUT_CD_S: 30,
   HUNTER_SCARE_CD_S: 15,
 
+  // ---- Traitor powers (tunable) ----
+  TRAITOR_DRAIN_RANGE: 2, // m — must be right next to the victim
+  TRAITOR_DRAIN_CD_S: 25, // cooldown
+  TRAITOR_DRAIN_BLIND_S: 25, // how long the drained flashlight stays dead
+  TRAITOR_MARK_RANGE: 4, // m — proximity to mark a searcher
+  TRAITOR_MARK_CD_S: 30, // cooldown
+  TRAITOR_MARK_S: 6, // how long the Caretaker sees the mark outline
+  TRAITOR_SLAM_S: 4, // Slam the Door: how long the exit is barred (3–5s tunable)
+  // ---- Accusation / public hearing (tunable) ----
+  ACCUSE_BEAT_S: 2.5, // dramatic beat between the claim and the verdict
+  ACCUSE_MINIMAP_REVEAL_S: 45, // correct guess → Caretaker shown on the minimap
+  ACCUSE_FALSE_PENALTY_S: 300, // wrong guess → accuser visible to the Caretaker (~rest of match)
+
   // ---- AI Caretaker (solo) ----
   AI_VISION_RANGE: 14,
   AI_VISION_FOV: 120, // degrees (full cone)
@@ -82,7 +95,7 @@ export const CONFIG = {
   AI_AWARE_DECAY: 18, // awareness lost per second with no stimulus
   AI_MELEE_COOLDOWN_S: 1.2,
   AI_HEARS_HIDDEN_RADIUS: 2,
-  AI_GUARD_PAD_THRESHOLD: 2, // once this many items are deposited, the AI biases toward guarding the extraction pad
+  AI_GUARD_PAD_THRESHOLD: 2, // once this many items are deposited (exit unlockable), the AI biases toward guarding the back EXIT + its approaches
   CARETAKER_RADIUS: 0.5,
 
   // ---- Mode toggles ----

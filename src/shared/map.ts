@@ -63,7 +63,7 @@ export interface BlackoutMap {
   pad: Zone; // extraction pad (lobby) — deposit items here (logic in A5)
   exit: Zone; // front-door escape trigger (used once doors unlock)
   barredDoor: MapBox; // solid collider blocking the front doors until unlock
-  booth: { platform: MapBox; ladder: MapBox; floorY: number; access: Zone };
+  booth: { platform: MapBox; stairs: MapBox[]; walls: MapBox[]; floorY: number; access: Zone };
   searcherSpawns: Vec3[];
   hunterSpawn: Vec3;
   requiredLoot: LootAnchor[];
@@ -99,7 +99,7 @@ const ROOMS_JSON: Array<[string, number, number, number, number]> = [
   ["maintenance", 46, 24, 64, 34],
   ["workshop", 46, 13, 64, 24],
   ["theatre", 24, 19, 46, 40],
-  ["lighting_booth", 31, 36, 39, 40],
+  ["lighting_booth", 40, 35, 46, 40], // SE corner of the theatre (out of the entry-door path)
   ["stage", 24, 13, 46, 19],
   ["back_hall", 2, 8, 64, 13],
   ["green_room", 2, 1, 26, 8],
@@ -145,7 +145,8 @@ const DOORS: Array<[string, string]> = [
   ["back_hall", "stage"],
   ["back_hall", "stage"], // two stage-back doors
   ["back_hall", "green_room"],
-  ["back_hall", "masks_closet"],
+  ["back_hall", "masks_closet"], // two doors into the masks closet → the exit has
+  ["back_hall", "masks_closet"], // more than one approach (can't be fully sealed)
   ["back_hall", "dressing_room"],
   ["theatre", "stage"], // open (audience faces the stage)
   ["dressing_room", "kitchen"],
@@ -271,8 +272,11 @@ function generateWalls(): { walls: MapBox[]; doors: DoorGap[] } {
     });
   }
 
-  // Front doors gap (lobby south exterior). Barred collider added separately.
-  push(hGap, key(wz(52)), [wx(35) - DOOR_W / 2, wx(35) + DOOR_W / 2]);
+  // Real exit: the stage door at the far-back (masks-closet north exterior wall,
+  // behind the theatre/backstage — the farthest point from the lobby). The front
+  // lobby wall is now solid (you spawn + deposit there, then dash across to here).
+  // Barred collider added separately; unlocks on objective complete OR traitor key.
+  push(hGap, key(wz(1)), [wx(34) - DOOR_W / 2, wx(34) + DOOR_W / 2]);
 
   const walls: MapBox[] = [];
   for (const [k, ivs] of vCover) {
@@ -356,7 +360,7 @@ function generateLockers(): LockerDef[] {
 // ---- Loot anchors (placed in A2) ----
 const REQUIRED_LOOT: LootAnchor[] = [
   { id: "keys", room: "admin_booth", x: wx(20), z: wz(43), risk: "medium" },
-  { id: "radio", room: "lighting_booth", x: wx(35), z: wz(38), risk: "high" },
+  { id: "radio", room: "lighting_booth", x: wx(43), z: wz(33), risk: "high" }, // at the foot of the relocated booth stairs
   { id: "gas_tank", room: "maintenance", x: wx(55), z: wz(29), risk: "medium" },
 ];
 const GOLDEN_BRICK: LootAnchor = { id: "golden_brick", room: "stage", x: wx(35), z: wz(16), risk: "high" };
@@ -369,8 +373,10 @@ const FLASHLIGHT_ANCHORS: LootAnchor[] = [
   { id: "fl_work", room: "workshop", x: wx(55), z: wz(18) },
 ];
 
-// ---- Booth (elevated, ladder access) ----
-const BOOTH_FLOOR_Y = 2.4;
+// ---- Booth (a low mezzanine in the theatre's back corner, reached by stairs) ----
+// Kept low enough to stand on with ceiling clearance (H=4) and to walk up via the
+// controller's step-offset. Sits in a corner so it never blocks a doorway.
+const BOOTH_FLOOR_Y = 1.35; // platform top ≈ 1.5m → ~2.4m headroom under the ceiling
 function buildBooth() {
   const r = ROOMS.get("lighting_booth")!;
   const cx = (r.x1 + r.x2) / 2;
@@ -384,18 +390,56 @@ function buildBooth() {
     d: r.z2 - r.z1,
     color: COL_BOOTH,
   };
-  // Ladder at the south (room-facing) edge of the booth.
-  const ladder: MapBox = {
-    x: cx,
-    y: BOOTH_FLOOR_Y / 2,
-    z: r.z2 + 0.3,
-    w: 0.9,
-    h: BOOTH_FLOOR_Y,
-    d: 0.3,
-    color: COL_LADDER,
+  // Stairs on the north (room-facing) edge, ascending south up to the platform.
+  const top = BOOTH_FLOOR_Y + 0.15; // walking surface
+  const zNorth = Math.min(r.z1, r.z2);
+  const n = 6;
+  const riser = top / n; // 0.25m per step → within the step-offset, so walkable
+  const tread = 0.4;
+  const sw = 1.6;
+  const sx = cx - 0.6;
+  const stairs: MapBox[] = [];
+  for (let i = 0; i < n; i++) {
+    const ht = riser * (i + 1); // solid box from the floor up to this step's top
+    const zc = zNorth - tread * (n - i) + tread / 2; // i=0 farthest into the room (lowest)
+    stairs.push({ x: sx, y: ht / 2, z: zc, w: sw, h: ht, d: tread, color: COL_LADDER });
+  }
+  const access: Zone = { x: sx, z: zNorth - tread * n - 0.5, w: sw, d: 1.0 };
+
+  // ---- Enclosure: frame each side with a sill + window opening + header (open
+  //      band between them = the window) so the platform reads as its own glassed
+  //      booth. A doorway gap on the north (stair) side lets you in. ----
+  const walls: MapBox[] = [];
+  const wt = 0.15; // wall thickness
+  const wx1 = r.x1 + 0.3, wx2 = r.x2 - 0.3; // inset so the corner sides clear the building walls
+  const wz1 = Math.min(r.z1, r.z2) + 0.3, wz2 = Math.max(r.z1, r.z2) - 0.3;
+  const sillY = (top + (top + 0.7)) / 2, sillH = 0.7; // platform top → +0.7
+  const hdrY = (top + 1.7 + (top + 2.2)) / 2, hdrH = 0.5; // header band near the top
+  const seg = (orient: "h" | "v", line: number, a: number, b: number, y: number, h: number) => {
+    const mid = (a + b) / 2, len = b - a;
+    if (len < 0.1) return;
+    walls.push(orient === "h"
+      ? { x: mid, y, z: line, w: len, h, d: wt, color: COL_BOOTH }
+      : { x: line, y, z: mid, w: wt, h, d: len, color: COL_BOOTH });
   };
-  const access: Zone = { x: cx, z: r.z2 + 0.7, w: 1.6, d: 1.4 };
-  return { platform, ladder, floorY: BOOTH_FLOOR_Y, access };
+  const side = (orient: "h" | "v", line: number, a: number, b: number) => {
+    seg(orient, line, a, b, sillY, sillH); // sill (waist-high)
+    seg(orient, line, a, b, hdrY, hdrH); // header (above the window)
+  };
+  side("v", wx1, wz1, wz2); // west (faces the house)
+  side("v", wx2, wz1, wz2); // east (against the building)
+  side("h", wz2, wx1, wx2); // south (against the building)
+  // north: split around the stair doorway
+  const doorL = sx - 0.9, doorR = sx + 0.9;
+  side("h", wz1, wx1, doorL);
+  side("h", wz1, doorR, wx2);
+  // corner posts (full height of the frame)
+  const postY = (top + (top + 2.2)) / 2, postH = 2.2;
+  for (const [px, pz] of [[wx1, wz1], [wx2, wz1], [wx1, wz2], [wx2, wz2]] as const) {
+    walls.push({ x: px, y: postY, z: pz, w: 0.2, h: postH, d: 0.2, color: COL_BOOTH });
+  }
+
+  return { platform, stairs, walls, floorY: BOOTH_FLOOR_Y, access };
 }
 
 // ---- Assemble ----
@@ -409,10 +453,12 @@ function makeGlenmoor(): BlackoutMap {
     d: 0.25,
     color: COL_SEALED,
   };
+  // Barred collider over the relocated far-back exit door (masks-closet north
+  // wall). Removed server/client when the doors unlock.
   const barredDoor: MapBox = {
-    x: wx(35),
+    x: wx(34),
     y: H / 2,
-    z: wz(52),
+    z: wz(1),
     w: DOOR_W,
     h: H,
     d: T,
@@ -427,8 +473,8 @@ function makeGlenmoor(): BlackoutMap {
     cover: generateCover(),
     decals: [sealed],
     lockers: generateLockers(),
-    pad: { x: wx(35), z: wz(49), w: 4, d: 3 },
-    exit: { x: wx(35), z: wz(51.5), w: 4, d: 1.4 },
+    pad: { x: wx(35), z: wz(49), w: 4, d: 3 }, // extraction pad stays in the front lobby
+    exit: { x: wx(34), z: wz(1.5), w: 3, d: 2 }, // real exit at the far-back stage door
     barredDoor,
     booth: buildBooth(),
     searcherSpawns: [
@@ -438,7 +484,7 @@ function makeGlenmoor(): BlackoutMap {
       { x: wx(40), y: 0, z: wz(47) },
       { x: wx(35), y: 0, z: wz(50) },
     ],
-    hunterSpawn: { x: wx(32), y: 0, z: wz(10) },
+    hunterSpawn: { x: wx(35), y: 0, z: wz(28) }, // mid-map (theatre) so the front→back dash is a real chase
     requiredLoot: REQUIRED_LOOT,
     goldenBrick: GOLDEN_BRICK,
     flashlightAnchors: FLASHLIGHT_ANCHORS,

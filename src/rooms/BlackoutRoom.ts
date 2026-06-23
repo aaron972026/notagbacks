@@ -79,6 +79,20 @@ export class BlackoutRoom extends Room<GameState> {
   private lastSab = new Map<string, number>();
   /** Last taunt timestamp per player (Caretaker taunt cooldown). */
   private lastTaunt = new Map<string, number>();
+  /** Last drain timestamp per traitor (Drain the Light cooldown). */
+  private lastDrain = new Map<string, number>();
+  /** Last mark timestamp per traitor (Mark cooldown). */
+  private lastMark = new Map<string, number>();
+  /** Session ids that have used their one accusation this match. */
+  private hasAccused = new Set<string>();
+  /** True while an accusation hearing is mid-beat (one at a time). */
+  private hearingActive = false;
+  /** Traitor mode: who secretly carries the door key (latent until exposed). */
+  private keyHolderId = "";
+  /** Slam the Door finisher: one-shot, the trapped slammer, and who was inside. */
+  private slamUsed = false;
+  private slamTrappedId = ""; // the slammer forfeits their own escape
+  private slamInsideIds: string[] = []; // searchers inside at slam time (for the shutout tally)
   /** Throttles for the automatic contextual stings. */
   private lastSting = 0;
   private lastRoar = 0;
@@ -99,7 +113,7 @@ export class BlackoutRoom extends Room<GameState> {
     this.setState(new GameState());
     this.state.code = code;
     this.state.hunterMode = HunterMode.ROTATE;
-    this.state.hiddenHunter = CONFIG.HIDDEN_HUNTER;
+    this.state.hiddenHunter = false; // the Hunter is shown from the start (no hidden-hunter mode)
     this.setMetadata({ code });
     this.setPatchRate(1000 / CONFIG.PATCH_RATE_HZ);
 
@@ -134,10 +148,6 @@ export class BlackoutRoom extends Room<GameState> {
       if (msg?.playerId && this.state.players.has(msg.playerId)) {
         this.state.pickedHunterId = msg.playerId;
       }
-    });
-    this.onMessage("setHiddenHunter", (client, msg: { value?: boolean }) => {
-      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
-      this.state.hiddenHunter = !!msg?.value;
     });
     this.onMessage("setTraitorMode", (client, msg: { value?: boolean }) => {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
@@ -176,6 +186,7 @@ export class BlackoutRoom extends Room<GameState> {
       this.clients
         .find((c) => this.roles.get(c.sessionId) === Role.HUNTER)
         ?.send("ping", { x: p.x, z: p.z });
+      this.traitorWhisper(p); // any traitor power → quiet positional tell
     });
     this.onMessage("setTimers", (client, msg: { hide?: number; lightsOn?: number; round?: number }) => {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
@@ -212,6 +223,10 @@ export class BlackoutRoom extends Room<GameState> {
     this.onMessage("throwAxe", (client) => this.handleAxe(client));
     this.onMessage("taunt", (client, msg: { index?: number }) => this.handleTaunt(client, msg?.index));
     this.onMessage("sabotage", (client, msg: { kind?: string }) => this.handleSabotage(client, msg?.kind));
+    this.onMessage("drain", (client) => this.handleDrain(client));
+    this.onMessage("mark", (client) => this.handleMark(client));
+    this.onMessage("accuse", (client, msg: { targetId?: string }) => this.handleAccuse(client, msg?.targetId));
+    this.onMessage("slam", (client) => this.handleSlam(client));
     this.onMessage("emote", (client, msg: { emoji?: string }) => {
       const e = msg?.emoji;
       if (!e || e.length > 8) return;
@@ -261,6 +276,17 @@ export class BlackoutRoom extends Room<GameState> {
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       if (Math.hypot(p.x - item.x, p.z - item.z) > CONFIG.PICKUP_RADIUS + 0.7) return;
+      if (item.kind === "door_key") {
+        // Route 2 (§3/§5): grabbing the dropped traitor key unlocks the front
+        // doors server-side and starts the dash. The key is consumed.
+        this.state.items.delete(item.id);
+        if (!this.state.doorsOpen) {
+          this.state.doorsOpen = true;
+          console.log(`[BlackoutRoom] ${p.name} took the traitor's key — doors unlocked`);
+          this.broadcast("sound", { soundId: "door_unlock", x: EXIT.x, z: EXIT.z });
+        }
+        return;
+      }
       item.carriedBy = client.sessionId;
     });
     this.onMessage("returnToLobby", (client) => {
@@ -394,6 +420,7 @@ export class BlackoutRoom extends Room<GameState> {
     if (this.state.traitorMode && searchers.length >= 2) {
       traitorId = searchers[Math.floor(Math.random() * searchers.length)];
       this.roles.set(traitorId, Role.TRAITOR);
+      this.keyHolderId = traitorId; // the traitor secretly carries the door key (§2/§3)
     }
 
     // Reflect into shared state (concealed: Hunter if hidden-Hunter; Traitor always).
@@ -696,9 +723,13 @@ export class BlackoutRoom extends Room<GameState> {
     // Only searchers interact with items / the pad / the exit.
     if (role !== Role.HUNTER) {
       this.tryDeposit(player);
-      if (this.state.doorsOpen && !player.escaped && inZone(player.x, player.z, EXIT)) {
+      // The slam temporarily bars the exit; the slammer can never escape (trapped).
+      const escapeOpen = this.state.slamFor <= 0 && player.id !== this.slamTrappedId;
+      if (escapeOpen && this.state.doorsOpen && !player.escaped && inZone(player.x, player.z, EXIT)) {
         player.escaped = true;
         console.log(`[BlackoutRoom] ${player.name} escaped!`);
+        // Real-time moment (§9): escapee gets "You made it", others a "[Name] escaped" toast.
+        this.broadcast("escaped", { id: player.id, name: player.name });
         this.maybeStingNo({ x: player.x, z: player.z }); // the Caretaker's frustrated "no"
         this.checkRoundEnd();
       }
@@ -759,6 +790,227 @@ export class BlackoutRoom extends Room<GameState> {
     }
     this.lastSab.set(cdKey, now);
     client.send("sab", { kind }); // confirm → starts the client cooldown
+    if (isTraitor) this.traitorWhisper(h); // any traitor power → quiet positional tell
+  }
+
+  /**
+   * Universal traitor tell: whenever the traitor uses ANY power, the server emits
+   * a quiet positional "whisper" at their location (small radius — see the BANK
+   * tuning client-side), reusing the same sound-event pipeline as the Caretaker
+   * taunts. Future power slices (Drain / Mark / Slam) call this too.
+   */
+  private traitorWhisper(p: Player) {
+    this.broadcast("sound", { soundId: "whisper", x: p.x, z: p.z });
+  }
+
+  /**
+   * Traitor "Drain the Light": zero a nearby searcher's flashlight battery,
+   * blinding them. Server validates role + phase + range + cooldown, tells the
+   * victim to kill their light, emits the flicker/sound cue + the whisper.
+   */
+  private handleDrain(client: Client) {
+    if (this.roles.get(client.sessionId) !== Role.TRAITOR) return;
+    const ph = this.state.phase;
+    if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
+    const t = this.state.players.get(client.sessionId);
+    if (!t) return;
+    const now = Date.now();
+    if (now - (this.lastDrain.get(client.sessionId) ?? -1e9) < CONFIG.TRAITOR_DRAIN_CD_S * 1000) return;
+
+    // Who's carrying a flashlight (a battery to drain)?
+    const carriers = new Set<string>();
+    this.state.items.forEach((it) => {
+      if (it.kind === "flashlight" && it.carriedBy) carriers.add(it.carriedBy);
+    });
+
+    // Nearest eligible searcher within close range.
+    let victim: Player | undefined;
+    let bestD: number = CONFIG.TRAITOR_DRAIN_RANGE;
+    this.state.players.forEach((p) => {
+      if (this.roles.get(p.id) !== Role.SEARCHER) return; // not the traitor/hunter
+      if (p.downed || p.escaped || p.hidden || !carriers.has(p.id)) return;
+      const d = Math.hypot(p.x - t.x, p.z - t.z);
+      if (d <= bestD) {
+        bestD = d;
+        victim = p;
+      }
+    });
+
+    if (!victim) {
+      client.send("sab", { kind: "drain", fail: "No lit searcher in reach" });
+      return; // no valid target → no cooldown
+    }
+
+    this.lastDrain.set(client.sessionId, now);
+    // Kill the victim's flashlight (client zeroes its battery for the blind window).
+    this.clients
+      .find((c) => c.sessionId === victim!.id)
+      ?.send("drained", { ms: CONFIG.TRAITOR_DRAIN_BLIND_S * 1000 });
+    // Flicker + dying-light sound at the victim, heard/seen by nearby clients.
+    this.broadcast("sound", { soundId: "drain", x: victim.x, z: victim.z });
+    this.traitorWhisper(t); // universal tell
+    client.send("sab", { kind: "drain" }); // confirm → starts the traitor's client cooldown
+  }
+
+  /**
+   * Traitor "Mark": flag a nearby searcher so the Caretaker sees them outlined
+   * for a few seconds. Server validates role + phase + range + cooldown, tells
+   * ONLY the Hunter to outline them, notifies the victim, and whispers.
+   */
+  private handleMark(client: Client) {
+    if (this.roles.get(client.sessionId) !== Role.TRAITOR) return;
+    const ph = this.state.phase;
+    if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
+    const t = this.state.players.get(client.sessionId);
+    if (!t) return;
+    const now = Date.now();
+    if (now - (this.lastMark.get(client.sessionId) ?? -1e9) < CONFIG.TRAITOR_MARK_CD_S * 1000) return;
+
+    // Nearest eligible searcher within proximity.
+    let victim: Player | undefined;
+    let bestD: number = CONFIG.TRAITOR_MARK_RANGE;
+    this.state.players.forEach((p) => {
+      if (this.roles.get(p.id) !== Role.SEARCHER) return;
+      if (p.downed || p.escaped || p.hidden) return;
+      const d = Math.hypot(p.x - t.x, p.z - t.z);
+      if (d <= bestD) {
+        bestD = d;
+        victim = p;
+      }
+    });
+
+    if (!victim) {
+      client.send("sab", { kind: "mark", fail: "No searcher to mark nearby" });
+      return; // no valid target → no cooldown
+    }
+
+    this.lastMark.set(client.sessionId, now);
+    const ms = CONFIG.TRAITOR_MARK_S * 1000;
+    // ONLY the Hunter is told (so the outline is Caretaker-only — no state leak).
+    this.clients
+      .find((c) => this.roles.get(c.sessionId) === Role.HUNTER)
+      ?.send("markTarget", { id: victim.id, ms });
+    // The victim gets the urgent notification.
+    this.clients.find((c) => c.sessionId === victim!.id)?.send("marked", {});
+    this.traitorWhisper(t); // universal tell
+    client.send("sab", { kind: "mark" }); // confirm → starts the traitor's client cooldown
+  }
+
+  /**
+   * Accusation / public hearing (spec §5). One per player per match. Runs an
+   * ANONYMOUS hearing (no accuser/target shown), a dramatic beat, then resolves:
+   *   correct → traitor exposed + dies, Caretaker shown on the minimap 45s;
+   *   wrong   → the accuser becomes visible to the Caretaker for the rest of the match.
+   * Fully server-authoritative.
+   */
+  private handleAccuse(client: Client, targetId?: string) {
+    if (!this.state.traitorMode) return; // no traitor → no hearings
+    const role = this.roles.get(client.sessionId);
+    if (role !== Role.SEARCHER && role !== Role.TRAITOR) return; // hunter can't accuse
+    const ph = this.state.phase;
+    if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
+    if (this.hearingActive) return; // one hearing at a time
+    if (this.hasAccused.has(client.sessionId)) return; // one accusation per player
+    const accuser = this.state.players.get(client.sessionId);
+    if (!accuser || accuser.downed || accuser.escaped) return;
+    if (!targetId || targetId === client.sessionId) return;
+    const target = this.state.players.get(targetId);
+    const tRole = this.roles.get(targetId);
+    if (!target || (tRole !== Role.SEARCHER && tRole !== Role.TRAITOR)) return; // must accuse a non-hunter
+    if (target.downed || target.escaped) return;
+
+    this.hasAccused.add(client.sessionId);
+    this.hearingActive = true;
+
+    // Opener names the accuser (not the target).
+    this.broadcast("hearing", { text: `${accuser.name} accused someone of being the traitor.` });
+
+    // …a held breath, then the verdict.
+    this.clock.setTimeout(() => {
+      this.resolveAccusation(client.sessionId, targetId);
+      this.hearingActive = false;
+    }, Math.round(CONFIG.ACCUSE_BEAT_S * 1000));
+  }
+
+  private resolveAccusation(accuserId: string, targetId: string) {
+    const accuser = this.state.players.get(accuserId);
+    if (!accuser) return;
+    const accuserName = accuser.name;
+    const correct = this.roles.get(targetId) === Role.TRAITOR;
+
+    if (correct) {
+      const traitor = this.state.players.get(targetId);
+      const traitorName = traitor?.name ?? "someone";
+      // The traitor's KEY DROPS at their location (route 2 opens): a searcher
+      // grabs it → doors unlock → the dash. Spawn before downing so we have a pos.
+      if (traitor && this.keyHolderId === targetId) {
+        this.addItem("door_key", "door_key", traitor.x, traitor.z);
+        this.keyHolderId = "";
+      }
+      if (traitor) traitor.downed = true; // exposed and dies; round continues
+      // Caretaker is revealed on the searchers' minimap for the dash window.
+      this.state.caretakerRevealFor = CONFIG.ACCUSE_MINIMAP_REVEAL_S;
+      this.broadcast("hearing", { text: `${accuserName} guessed right — the traitor was ${traitorName}.` });
+      this.checkRoundEnd();
+    } else {
+      // Wrong: the false accuser becomes visible to the Caretaker (Hunter sees them).
+      this.clients
+        .find((c) => this.roles.get(c.sessionId) === Role.HUNTER)
+        ?.send("markTarget", { id: accuserId, ms: CONFIG.ACCUSE_FALSE_PENALTY_S * 1000 });
+      this.broadcast("hearing", { text: `${accuserName} guessed wrong — the traitor is still among us.` });
+    }
+  }
+
+  /**
+   * Slam the Door (§3/§4) — the traitor's endgame finisher. Only once the doors
+   * are unlocked (escape phase). Bars the EXIT for TRAITOR_SLAM_S, reveals the
+   * traitor, and TRAPS them (they forfeit their own escape). At window end the
+   * server tallies who was caught: shutout → outright traitor win; some → counts
+   * toward the Caretaker's night (round end); none → exposed, trapped, loses.
+   * One-shot per match.
+   */
+  private handleSlam(client: Client) {
+    if (this.roles.get(client.sessionId) !== Role.TRAITOR) return;
+    const ph = this.state.phase;
+    if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
+    if (!this.state.doorsOpen) return; // only after the doors unlock
+    if (this.slamUsed) return; // one-shot finisher
+    const t = this.state.players.get(client.sessionId);
+    if (!t) return;
+
+    this.slamUsed = true;
+    this.slamTrappedId = client.sessionId; // committed — the slammer can't escape now
+    // Record who's still inside (alive, not escaped) for the shutout tally.
+    this.slamInsideIds = [];
+    this.state.players.forEach((p) => {
+      if (this.roles.get(p.id) !== Role.SEARCHER) return; // count the real searchers
+      if (p.downed || p.escaped) return;
+      this.slamInsideIds.push(p.id);
+    });
+    this.state.slamFor = CONFIG.TRAITOR_SLAM_S; // bar the exit (escape suppressed in handleMove)
+
+    this.broadcast("hearing", { text: `${t.name} slammed the door — the traitor reveals themselves!` });
+    this.broadcast("sound", { soundId: "door_slam", x: EXIT.x, z: EXIT.z });
+
+    this.clock.setTimeout(() => this.resolveSlam(), CONFIG.TRAITOR_SLAM_S * 1000);
+  }
+
+  private resolveSlam() {
+    this.state.slamFor = 0; // the exit reopens
+    const inside = this.slamInsideIds;
+    this.slamInsideIds = [];
+    if (inside.length === 0) return;
+    const caught = inside.filter((id) => this.state.players.get(id)?.downed).length;
+    if (caught >= inside.length) {
+      // Shutout — everyone trapped inside was caught: outright (flawless) traitor win.
+      this.broadcast("hearing", { text: "A flawless finish — no one escaped the slam." });
+      this.endRound("hunter");
+    } else if (caught > 0) {
+      this.broadcast("hearing", { text: `The slam caught ${caught} — the rest slipped out.` });
+      // counts toward the Caretaker's night; the round resolves normally at its end.
+    } else {
+      this.broadcast("hearing", { text: "The slam caught no one — the traitor is exposed and trapped." });
+    }
   }
 
   /** A door can be locked only if it won't leave an adjacent room with no way out. */
@@ -774,6 +1026,8 @@ export class BlackoutRoom extends Room<GameState> {
 
   private tickSabotage() {
     if (this.state.lightsOutFor > 0) this.state.lightsOutFor--;
+    if (this.state.caretakerRevealFor > 0) this.state.caretakerRevealFor--;
+    if (this.state.slamFor > 0) this.state.slamFor--;
     const now = Date.now();
     for (const [id, exp] of [...this.doorExpiry]) {
       if (now >= exp) {
@@ -787,7 +1041,17 @@ export class BlackoutRoom extends Room<GameState> {
   private clearSabotage() {
     this.doorExpiry.clear();
     this.lastSab.clear();
+    this.lastDrain.clear();
+    this.lastMark.clear();
     this.state.lightsOutFor = 0;
+    this.state.caretakerRevealFor = 0;
+    this.hasAccused.clear();
+    this.hearingActive = false;
+    this.keyHolderId = "";
+    this.slamUsed = false;
+    this.slamTrappedId = "";
+    this.slamInsideIds = [];
+    this.state.slamFor = 0;
     if (this.state.lockedDoors.length) this.state.lockedDoors.splice(0, this.state.lockedDoors.length);
   }
 
@@ -921,7 +1185,7 @@ export class BlackoutRoom extends Room<GameState> {
       this.state.doorsOpen = true;
       console.log(`[BlackoutRoom] all items deposited — front doors unlocked`);
       // MP-consistent world sound: the front doors unlocking, heard by everyone.
-      this.broadcast("sound", { soundId: "door_unlock", x: PAD.x, z: PAD.z });
+      this.broadcast("sound", { soundId: "door_unlock", x: EXIT.x, z: EXIT.z });
     }
   }
 
@@ -942,7 +1206,9 @@ export class BlackoutRoom extends Room<GameState> {
         done++;
       }
     });
-    if (total > 0 && done === total) this.endRound(escaped > 0 ? "searchers" : "hunter");
+    // The Caretaker's side wins the night if FEWER THAN HALF the searchers escape
+    // (§3). Individual escapees still "won by escaping" regardless (results screen).
+    if (total > 0 && done === total) this.endRound(escaped * 2 >= total ? "searchers" : "hunter");
   }
 
   onDispose() {

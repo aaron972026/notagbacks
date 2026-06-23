@@ -3,7 +3,13 @@ import { DEFAULT_MAP } from "../shared/map";
 import type { GameState, Caretaker } from "../schema/GameState.js";
 import { NavMap, type Pt } from "./NavMap.js";
 
-const PAD = DEFAULT_MAP.pad;
+const EXIT = DEFAULT_MAP.exit;
+// Endgame guard targets: the relocated far-back exit door + an approach point in
+// the back-hall corridor leading to it (the chokepoint for the escape dash).
+const EXIT_GUARD: Pt[] = [
+  { x: EXIT.x, z: EXIT.z + 1 }, // just inside the doorway
+  { x: EXIT.x, z: EXIT.z + 7 }, // the back-hall approach to the exit
+];
 
 /**
  * The AI Caretaker (solo Hunter). Server-authoritative. Perception (sight cone +
@@ -24,7 +30,7 @@ export class CaretakerAI {
   private meleeReadyAt = 0;
   private investigateUntil = 0;
   private searchUntil = 0;
-  private guard = false; // endgame: bias toward the pad / front doors
+  private guard = false; // endgame: bias toward the back exit + its approaches
 
   constructor(private readonly nav: NavMap) {}
 
@@ -167,8 +173,9 @@ export class CaretakerAI {
   }
 
   private pickPatrol(me: Pt): Pt {
-    // Endgame: haunt the extraction pad / front doors (the chokepoint).
-    if (this.guard && Math.random() < 0.75) return { x: PAD.x, z: PAD.z };
+    // Endgame (exit unlockable): pressure the far-back exit dash — haunt the back
+    // door + the corridor approaching it, not the front deposit pad.
+    if (this.guard && Math.random() < 0.8) return EXIT_GUARD[Math.floor(Math.random() * EXIT_GUARD.length)];
     const nodes = this.nav.nodeList();
     let best = nodes[0];
     let bestScore = -Infinity;

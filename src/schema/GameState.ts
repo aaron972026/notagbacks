@@ -52,6 +52,8 @@ export class GameState extends Schema {
   @type("boolean") doorsOpen = false; // front doors unlocked (all items deposited)
   @type(["string"]) lockedDoors = new ArraySchema<string>(); // doors the Hunter slammed shut
   @type("number") lightsOutFor = 0; // seconds remaining of the Hunter's light sabotage
+  @type("number") caretakerRevealFor = 0; // seconds the Caretaker shows on searchers' minimap (correct accusation)
+  @type("number") slamFor = 0; // seconds the exit is barred by the traitor's door-slam finisher
   @type({ map: Player }) players = new MapSchema<Player>();
   @type({ map: Item }) items = new MapSchema<Item>();
   @type(Caretaker) caretaker = new Caretaker();
@@ -59,7 +61,7 @@ export class GameState extends Schema {
   // ---- Lobby / roles ----
   @type("string") hostId = ""; // session id of the host (controls settings/start)
   @type("string") hunterMode: HunterMode = HunterMode.ROTATE; // pick | rotate
-  @type("boolean") hiddenHunter = true; // conceal the Hunter until blackout
+  @type("boolean") hiddenHunter = false; // (removed feature) Hunter is always shown from the start
   @type("boolean") traitorMode = false; // one searcher is secretly on the Hunter's side
   @type("boolean") axeThrows = false; // host setting: Hunter can throw axes (50/50, 5s recharge)
   @type("string") pickedHunterId = ""; // chosen hunter when hunterMode = pick
