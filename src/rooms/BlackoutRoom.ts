@@ -1,6 +1,6 @@
 import { Room, Client } from "colyseus";
 import { CONFIG, Phase, Role, HunterMode, REQUIRED_ITEM_KINDS, ItemKind } from "../shared/config";
-import { DEFAULT_MAP, type DoorGap } from "../shared/map";
+import { DEFAULT_MAP, SOLO_LOOT_ROOMS, roomSpot, type DoorGap } from "../shared/map";
 
 const DOOR_LOCK_S = 45; // how long a slammed door stays locked, then it reopens
 const KILL_LIGHTS_S = 8; // duration of the total kill-the-lights blackout (also kills flashlights)
@@ -442,11 +442,13 @@ export class BlackoutRoom extends Room<GameState> {
     this.placeFlashlights(searcherCount);
     // The rest (required items + golden brick): solo auto-places; multiplayer has
     // the Hunter place it during HIDE.
-    const loot = this.buildLoot();
     if (this.solo) {
-      for (const l of loot) this.addItem(l.id, l.kind, l.x, l.z);
+      // Solo: randomize each required item + the golden brick among candidate
+      // rooms so the hunt isn't the same every game.
+      for (const l of this.buildSoloLoot()) this.addItem(l.id, l.kind, l.x, l.z);
       this.pending = [];
     } else {
+      const loot = this.buildLoot();
       this.pending = loot;
       const hunterClient = this.clients.find((c) => this.roles.get(c.sessionId) === Role.HUNTER);
       if (hunterClient) this.sendPlacement(hunterClient);
@@ -605,6 +607,26 @@ export class BlackoutRoom extends Room<GameState> {
     const list: Array<{ id: string; kind: string; x: number; z: number }> = [];
     for (const l of m.requiredLoot) list.push({ id: l.id, kind: l.id, x: l.x, z: l.z });
     list.push({ id: "golden_brick", kind: "golden_brick", x: m.goldenBrick.x, z: m.goldenBrick.z });
+    return list;
+  }
+
+  /** Solo loot: pick a random candidate room per item each game (falling back to
+   *  the fixed anchor if a room is missing), so spots vary between solo rounds. */
+  private buildSoloLoot(): Array<{ id: string; kind: string; x: number; z: number }> {
+    const m = DEFAULT_MAP;
+    const pick = <T,>(a: T[]): T => a[Math.floor(Math.random() * a.length)];
+    const spotFor = (kind: string, fallback: { x: number; z: number }) => {
+      const rooms = SOLO_LOOT_ROOMS[kind];
+      const s = rooms && rooms.length ? roomSpot(pick(rooms), 0.6) : null;
+      return s ?? fallback;
+    };
+    const list: Array<{ id: string; kind: string; x: number; z: number }> = [];
+    for (const l of m.requiredLoot) {
+      const s = spotFor(l.id, { x: l.x, z: l.z });
+      list.push({ id: l.id, kind: l.id, x: s.x, z: s.z });
+    }
+    const gb = spotFor("golden_brick", { x: m.goldenBrick.x, z: m.goldenBrick.z });
+    list.push({ id: "golden_brick", kind: "golden_brick", x: gb.x, z: gb.z });
     return list;
   }
 

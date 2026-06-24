@@ -121,6 +121,42 @@ for (const [id, x1, z1, x2, z2] of ROOMS_JSON) {
 export type RoomRect = Rect;
 export const ROOM_RECTS: RoomRect[] = Array.from(ROOMS.values());
 
+/**
+ * SOLO loot variation — each required item (and the golden brick) can spawn in any
+ * of several rooms, picked fresh each solo game so the hunt isn't always identical.
+ * (Multiplayer is unaffected — the Hunter places loot by hand during HIDE.)
+ */
+export const SOLO_LOOT_ROOMS: Record<string, string[]> = {
+  keys: ["admin_booth", "green_room", "dressing_room", "kitchen", "workshop"],
+  radio: ["lighting_booth", "stage", "theatre", "back_hall", "green_room"],
+  gas_tank: ["maintenance", "workshop", "gym", "kitchen", "east_hall"],
+  golden_brick: ["stage", "theatre", "green_room", "dressing_room", "masks_closet"],
+};
+
+/** A spawn-safe point inside a room (centre, optionally jittered toward the edges),
+ *  in WORLD coords. `jitter` is 0..1 of the half-extent (kept off the walls). */
+export function roomSpot(roomId: string, jitter = 0): { x: number; z: number } | null {
+  const r = ROOMS.get(roomId);
+  if (!r) return null;
+  const x1 = Math.min(r.x1, r.x2), x2 = Math.max(r.x1, r.x2);
+  const z1 = Math.min(r.z1, r.z2), z2 = Math.max(r.z1, r.z2);
+  const inset = 1.0; // keep items off the walls
+  const cx = (x1 + x2) / 2, cz = (z1 + z2) / 2;
+  const rx = Math.max(0, (x2 - x1) / 2 - inset);
+  const rz = Math.max(0, (z2 - z1) / 2 - inset);
+  return { x: cx + (Math.random() * 2 - 1) * jitter * rx, z: cz + (Math.random() * 2 - 1) * jitter * rz };
+}
+
+/** The room id containing a world point (for the client's "Find: …" hint), or "". */
+export function roomIdAt(x: number, z: number): string {
+  for (const r of ROOM_RECTS) {
+    const x1 = Math.min(r.x1, r.x2), x2 = Math.max(r.x1, r.x2);
+    const z1 = Math.min(r.z1, r.z2), z2 = Math.max(r.z1, r.z2);
+    if (x >= x1 && x <= x2 && z >= z1 && z <= z2) return r.id;
+  }
+  return "";
+}
+
 // Doors: pairs of room ids that have a passable opening between them.
 //
 // NOTE: several doors in the source JSON connect rooms whose rectangles don't
