@@ -1,5 +1,5 @@
 import { Room, Client } from "colyseus";
-import { CONFIG, Phase, Role, HunterMode, REQUIRED_ITEM_KINDS, ItemKind } from "../shared/config";
+import { CONFIG, MASK_IDS, TITLE_IDS, DARE_IDS, Phase, Role, HunterMode, REQUIRED_ITEM_KINDS, ItemKind } from "../shared/config";
 import { DEFAULT_MAP, SOLO_LOOT_ROOMS, roomSpot, type DoorGap } from "../shared/map";
 
 const DOOR_LOCK_S = 45; // how long a slammed door stays locked, then it reopens
@@ -71,6 +71,8 @@ export class BlackoutRoom extends Room<GameState> {
   /** Per-hunter melee cooldown timestamps. */
   private lastMelee = new Map<string, number>();
   private lastAxe = new Map<string, number>();
+  /** Axes remaining this match (scarce pool, reset each round). */
+  private axesLeft: number = CONFIG.AXE_POOL;
   /** Items the human Hunter still needs to place during HIDE (MP). */
   private pending: Array<{ id: string; kind: string; x: number; z: number }> = [];
   /** When each locked door auto-reopens (epoch ms). */
@@ -102,8 +104,17 @@ export class BlackoutRoom extends Room<GameState> {
   private roomDoors = new Map<string, string[]>();
   /** session ids with proximity voice enabled. */
   private voiceOn = new Set<string>();
+  /** Night Report — per-round movement/hiding tallies + catch/escape order. */
+  private nightRun = new Map<string, number>(); // seconds spent running
+  private nightHidden = new Map<string, number>(); // seconds spent in lockers
+  private nightMoveAt = new Map<string, number>(); // last tally timestamp
+  private caughtOrder: string[] = [];
+  private escapeTimes = new Map<string, number>(); // sessionId → seconds after blackout
+  private blackoutAt = 0; // epoch ms when the blackout began
   /** Last troll timestamp per downed player (cooldown). */
   private lastTroll = new Map<string, number>();
+  /** Report throttle per player. */
+  private lastReport = new Map<string, number>();
 
   private nav = new NavMap();
   private ai = new CaretakerAI(this.nav);
@@ -114,7 +125,7 @@ export class BlackoutRoom extends Room<GameState> {
     this.state.code = code;
     this.state.hunterMode = HunterMode.ROTATE;
     this.state.hiddenHunter = false; // the Hunter is shown from the start (no hidden-hunter mode)
-    this.setMetadata({ code });
+    this.syncMetadata();
     this.setPatchRate(1000 / CONFIG.PATCH_RATE_HZ);
 
     this.onMessage("move", (client, msg: MoveMsg) => this.handleMove(client, msg));
@@ -134,7 +145,7 @@ export class BlackoutRoom extends Room<GameState> {
     }
 
     // Simulation loop: drives the AI Caretaker.
-    this.setSimulationInterval((deltaMs) => this.simulate(deltaMs), 50);
+    this.setSimulationInterval((deltaMs) => this.simulate(deltaMs), 1000 / CONFIG.SIM_RATE_HZ);
 
     // ---- Host-only lobby controls ----
     this.onMessage("setHunterMode", (client, msg: { mode?: string }) => {
@@ -157,15 +168,43 @@ export class BlackoutRoom extends Room<GameState> {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
       this.state.axeThrows = !!msg?.value;
     });
+    this.onMessage("setFlashlights", (client, msg: { scarcity?: boolean }) => {
+      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
+      this.state.flashlightScarcity = !!msg?.scarcity;
+    });
+    this.onMessage("setAiHunter", (client, msg: { value?: boolean }) => {
+      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
+      this.state.aiHunter = !!msg?.value;
+    });
+    this.onMessage("setPublic", (client, msg: { value?: boolean }) => {
+      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
+      this.state.isPublic = !!msg?.value;
+      this.syncMetadata();
+    });
     this.onMessage("setName", (client, msg: { name?: string }) => {
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       const n = (msg?.name ?? "").trim().slice(0, 16);
       if (n) p.name = n; // ignore blanks so a player keeps a usable name
     });
+    // Cosmetic mask — whitelist-validated ("" clears). Unlock progress is
+    // client-side (no accounts); masks are cosmetic, so that trust is fine.
+    this.onMessage("setMask", (client, msg: { mask?: string }) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      const m = msg?.mask ?? "";
+      if (m === "" || (MASK_IDS as readonly string[]).includes(m)) p.mask = m;
+    });
+    this.onMessage("setTitle", (client, msg: { title?: string }) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      const t = msg?.title ?? "";
+      if (t === "" || (TITLE_IDS as readonly string[]).includes(t)) p.title = t;
+    });
     this.onMessage("setRoomName", (client, msg: { name?: string }) => {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
       this.state.roomName = (msg?.name ?? "").trim().slice(0, 24);
+      this.syncMetadata();
     });
     // Searcher whistle taunt → reveal their spot to the Hunter for 5s + everyone hears it.
     this.onMessage("whistle", (client) => {
@@ -177,7 +216,9 @@ export class BlackoutRoom extends Room<GameState> {
       this.clients
         .find((c) => this.roles.get(c.sessionId) === Role.HUNTER)
         ?.send("ping", { x: p.x, z: p.z });
-      this.broadcast("whistle", {}, { except: client });
+      // Positional: everyone hears WHERE the whistle came from (distance falloff
+      // client-side) — it's a location taunt, not a global jingle.
+      this.broadcast("whistle", { x: p.x, z: p.z }, { except: client });
     });
     this.onMessage("traitorPing", (client) => {
       if (this.roles.get(client.sessionId) !== Role.TRAITOR) return;
@@ -269,10 +310,15 @@ export class BlackoutRoom extends Room<GameState> {
       this.sendPlacement(client);
     });
     this.onMessage("pickup", (client, msg: { itemId?: string }) => {
-      if (this.state.phase === Phase.LOBBY) return;
       if (this.roles.get(client.sessionId) === Role.HUNTER) return; // hunter can't loot
       const item = msg?.itemId ? this.state.items.get(msg.itemId) : undefined;
       if (!item || item.carriedBy || item.deposited) return;
+      // Loot only exists to the searchers during the hunt. One exception:
+      // flashlights sit at the spawn and may be grabbed while the lights are
+      // still on (nobody should fumble for their own light in the dark).
+      const ph = this.state.phase;
+      const hunting = ph === Phase.BLACKOUT || ph === Phase.ESCAPE;
+      if (!hunting && !(ph === Phase.LIGHTS_ON && item.kind === "flashlight")) return;
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       if (Math.hypot(p.x - item.x, p.z - item.z) > CONFIG.PICKUP_RADIUS + 0.7) return;
@@ -293,6 +339,21 @@ export class BlackoutRoom extends Room<GameState> {
       if (!this.isHost(client)) return;
       this.returnToLobby();
     });
+    // Player report — logged server-side (visible in Colyseus Cloud logs), which
+    // is the moderation paper-trail the app stores require. Throttled.
+    this.onMessage("report", (client, msg: { targetId?: string; reason?: string }) => {
+      const now = Date.now();
+      if (now - (this.lastReport.get(client.sessionId) ?? 0) < 10_000) return;
+      this.lastReport.set(client.sessionId, now);
+      const reporter = this.state.players.get(client.sessionId);
+      const target = msg?.targetId ? this.state.players.get(msg.targetId) : undefined;
+      if (!reporter || !target || target.id === client.sessionId) return;
+      const reason = String(msg?.reason ?? "").slice(0, 140);
+      console.warn(
+        `[REPORT] room=${this.state.code} ${reporter.name}(${client.sessionId}) → ${target.name}(${target.id}): ${reason || "(no reason)"}`,
+      );
+      client.send("reported", {});
+    });
     this.onMessage("revive", (client) => {
       const reviver = this.state.players.get(client.sessionId);
       if (!reviver || reviver.downed || reviver.escaped) return;
@@ -309,6 +370,7 @@ export class BlackoutRoom extends Room<GameState> {
       if (!target) return;
       target.downed = false;
       this.state.items.delete(brick.id); // consumed
+      client.send("revived", {}); // ack → the reviver's profile stats
       console.log(`[BlackoutRoom] ${reviver.name} revived ${target.name}`);
     });
 
@@ -317,8 +379,19 @@ export class BlackoutRoom extends Room<GameState> {
 
   onJoin(
     client: Client,
-    options: { name?: string; spawn?: { x: number; z: number; ry: number } },
+    options: { name?: string; spawn?: { x: number; z: number; ry: number }; protocol?: number },
   ) {
+    // Version handshake: client + server deploy separately; a stale client gets
+    // a clear error instead of undebuggable schema-decode weirdness.
+    if ((options.protocol ?? 0) !== CONFIG.PROTOCOL_VERSION) {
+      throw new Error("Update required — your game version doesn't match the server.");
+    }
+    // No mid-match joins: a joiner during a live round would have no role — an
+    // un-downable "ghost" that can still loot and win. Lobby/campfire only.
+    const ph = this.state.phase;
+    if (ph !== Phase.LOBBY && ph !== Phase.CAMPFIRE) {
+      throw new Error("Match in progress — try again when the round ends.");
+    }
     const player = new Player();
     player.id = client.sessionId;
     player.name = options.name?.slice(0, 16) || sillyName();
@@ -333,13 +406,49 @@ export class BlackoutRoom extends Room<GameState> {
     // First player in becomes host.
     if (!this.state.hostId) this.state.hostId = client.sessionId;
 
+    this.syncMetadata();
     console.log(
       `[BlackoutRoom] ${player.name} joined (${this.state.players.size}/${this.maxClients})`,
     );
   }
 
-  onLeave(client: Client, _consented: boolean) {
+  async onLeave(client: Client, consented: boolean) {
+    // Reconnection grace: a wifi blip or refresh during a live round should be a
+    // 30-second hiccup, not a deleted player. The body is kept (flagged
+    // disconnected → clients hide it, the Caretaker ignores it); on return the
+    // client is re-sent its role + current pose so its camera snaps back.
+    const graceP = this.state.players.get(client.sessionId);
+    const graceLive = (() => {
+      const ph = this.state.phase;
+      return ph === Phase.HIDE || ph === Phase.LIGHTS_ON || ph === Phase.BLACKOUT || ph === Phase.ESCAPE;
+    })();
+    if (!consented && graceLive && graceP) {
+      graceP.connected = false;
+      console.log(`[BlackoutRoom] ${graceP.name} lost connection — holding a 30s seat`);
+      try {
+        await this.allowReconnection(client, 30);
+        graceP.connected = true;
+        // Re-send the private role + current pose a beat later — the reconnected
+        // client needs a moment to re-register its message handlers, and this
+        // snap puts its camera back on its (server-kept) body.
+        this.clock.setTimeout(() => {
+          client.send("yourRole", {
+            role: this.roles.get(client.sessionId) ?? Role.SEARCHER,
+            spawn: { x: graceP.x, y: graceP.y, z: graceP.z, ry: graceP.ry },
+          });
+        }, 400);
+        console.log(`[BlackoutRoom] ${graceP.name} reconnected`);
+        return;
+      } catch {
+        // Grace expired — fall through to the permanent removal below.
+      }
+    }
+
     const leaving = this.state.players.get(client.sessionId);
+    const leavingRole = this.roles.get(client.sessionId);
+    const ph = this.state.phase;
+    const live =
+      ph === Phase.HIDE || ph === Phase.LIGHTS_ON || ph === Phase.BLACKOUT || ph === Phase.ESCAPE;
     // Drop anything they were carrying back onto the floor where they stood.
     this.state.items.forEach((item) => {
       if (item.carriedBy === client.sessionId) {
@@ -350,6 +459,13 @@ export class BlackoutRoom extends Room<GameState> {
         }
       }
     });
+    // The traitor bailed mid-round: the door key falls where they stood so the
+    // deduction route isn't silently dead (and accusations aren't guaranteed-wrong).
+    if (live && leavingRole === Role.TRAITOR && this.keyHolderId === client.sessionId && leaving) {
+      this.addItem("door_key", "door_key", leaving.x, leaving.z);
+      this.keyHolderId = "";
+      this.broadcast("hearing", { text: `${leaving.name} vanished — something metallic hit the floor…` });
+    }
     this.state.players.delete(client.sessionId);
     this.lastMoveAt.delete(client.sessionId);
     this.running.delete(client.sessionId);
@@ -365,6 +481,24 @@ export class BlackoutRoom extends Room<GameState> {
       this.state.hostId = next.done ? "" : next.value;
     }
 
+    if (live) {
+      if (leavingRole === Role.HUNTER && !this.solo) {
+        // The human Hunter dropped: without a monster there is no round (and
+        // during HIDE everyone would sit frozen). Searchers take the night.
+        this.broadcast("hearing", { text: "The Hunter has fled the building — the searchers win the night." });
+        this.endRound("searchers");
+      } else {
+        // If no searchers remain (everyone but the Hunter left), stop the round.
+        let searchersLeft = 0;
+        this.state.players.forEach((p) => {
+          if (this.roles.get(p.id) === Role.SEARCHER || this.roles.get(p.id) === Role.TRAITOR) searchersLeft++;
+        });
+        if (searchersLeft === 0) this.returnToLobby();
+        else this.checkRoundEnd(); // the leaver may have been the last one still inside
+      }
+    }
+
+    this.syncMetadata();
     console.log(
       `[BlackoutRoom] ${client.sessionId} left (${this.state.players.size}/${this.maxClients})`,
     );
@@ -376,15 +510,25 @@ export class BlackoutRoom extends Room<GameState> {
     return client.sessionId === this.state.hostId;
   }
 
+  /** Mirror browse-relevant fields into room metadata (drives GET /lobbies). */
+  private syncMetadata() {
+    void this.setMetadata({
+      code: this.state.code,
+      public: this.state.isPublic,
+      name: this.state.roomName,
+      phase: this.state.phase,
+    });
+  }
+
   private startMatch() {
     const ids = [...this.state.players.keys()];
     if (ids.length === 0) return;
 
-    // Solo (1 player) = AI Caretaker; 2+ = a human plays the Hunter.
-    this.solo = ids.length < 2;
+    // AI Caretaker hunts when playing solo OR when the host picked co-op vs AI;
+    // otherwise a human plays the Hunter. (`solo` = "the AI is the Hunter".)
+    this.solo = ids.length < 2 || this.state.aiHunter;
 
-    // Choose the Hunter. In SOLO the Caretaker is an AI (not a human player), so
-    // every human is a Searcher.
+    // Choose the Hunter. When the AI hunts, every human is a Searcher.
     let hunterId = "";
     if (!this.solo) {
       if (this.state.hunterMode === HunterMode.PICK) {
@@ -402,16 +546,52 @@ export class BlackoutRoom extends Room<GameState> {
     this.state.outcome = "";
     this.state.deposited = 0;
     this.state.doorsOpen = false;
+    this.axesLeft = CONFIG.AXE_POOL;
+    // Tonight's Dare: usually one, sometimes a quiet night (keeps it special).
+    this.state.dare = Math.random() < 0.65 ? DARE_IDS[Math.floor(Math.random() * DARE_IDS.length)] : "";
+    // Fresh Night Report ledger.
+    this.nightRun.clear();
+    this.nightHidden.clear();
+    this.nightMoveAt.clear();
+    this.caughtOrder = [];
+    this.escapeTimes.clear();
+    this.blackoutAt = 0;
     this.clearSabotage();
     this.state.players.forEach((p) => {
       p.downed = false;
       p.escaped = false;
+      p.hidden = false;
     });
 
     // Assign authoritative roles.
     this.roles.clear();
     for (const id of ids) {
       this.roles.set(id, id === hunterId ? Role.HUNTER : Role.SEARCHER);
+    }
+
+    // Respawn everyone at their match-start spots. Without this, rematches
+    // resume from wherever players ended up — escapees OUTSIDE the building,
+    // downed spectators wherever their free-fly camera floated.
+    const spawns = DEFAULT_MAP.searcherSpawns;
+    const spawnFor = new Map<string, { x: number; y: number; z: number; ry: number }>();
+    let si = 0;
+    for (const id of ids) {
+      const p = this.state.players.get(id)!;
+      let sp: { x: number; y: number; z: number; ry: number };
+      if (id === hunterId) {
+        sp = { x: DEFAULT_MAP.hunterSpawn.x, y: 0, z: DEFAULT_MAP.hunterSpawn.z, ry: 0 };
+      } else {
+        const s = spawns[si++ % spawns.length];
+        sp = { x: s.x, y: 0, z: s.z, ry: Math.PI };
+      }
+      p.x = sp.x;
+      p.y = sp.y;
+      p.z = sp.z;
+      p.ry = sp.ry;
+      spawnFor.set(id, sp);
+      // Fresh movement clock, so the first post-spawn move isn't judged against
+      // a stale timestamp (a huge dt makes the speed clamp vacuous).
+      this.lastMoveAt.set(id, Date.now());
     }
 
     // Traitor mode: secretly flip one searcher (needs ≥2 searchers so a real one remains).
@@ -426,9 +606,13 @@ export class BlackoutRoom extends Room<GameState> {
     // Reflect into shared state (concealed: Hunter if hidden-Hunter; Traitor always).
     this.applyRoles("start");
 
-    // Tell each client its OWN role privately (works even when concealed).
+    // Tell each client its OWN role privately (works even when concealed), plus
+    // its authoritative spawn so the local camera snaps to the round start.
     for (const c of this.clients) {
-      c.send("yourRole", { role: this.roles.get(c.sessionId) ?? Role.SEARCHER });
+      c.send("yourRole", {
+        role: this.roles.get(c.sessionId) ?? Role.SEARCHER,
+        spawn: spawnFor.get(c.sessionId),
+      });
     }
     // Let the Hunter know their secret ally.
     if (traitorId) {
@@ -436,10 +620,17 @@ export class BlackoutRoom extends Room<GameState> {
     }
 
     const searcherCount = ids.filter((id) => this.roles.get(id) !== Role.HUNTER).length;
+    // Objective scales with the team: 1-2 searchers need 2 items, 3+ need all 3 —
+    // the item grind shouldn't dominate a small group's night. (All 3 still spawn.)
+    this.state.requiredItems = searcherCount <= 2 ? 2 : CONFIG.REQUIRED_ITEMS;
     this.state.items.clear();
-    // Flashlights: one per searcher, ALWAYS auto-placed in view of the spawn
-    // (never Hunter-placed) so everyone can grab a light.
-    this.placeFlashlights(searcherCount);
+    // Flashlights: ALWAYS auto-placed in view of the spawn (never Hunter-placed).
+    // Default = one per searcher; "buddy-up" scarcity (host option) = one fewer,
+    // so somebody has to share.
+    const flashlights = this.state.flashlightScarcity
+      ? CONFIG.flashlightsFor(searcherCount)
+      : searcherCount;
+    this.placeFlashlights(flashlights);
     // The rest (required items + golden brick): solo auto-places; multiplayer has
     // the Hunter place it during HIDE.
     if (this.solo) {
@@ -463,6 +654,7 @@ export class BlackoutRoom extends Room<GameState> {
       this.state.phase = Phase.HIDE;
       this.state.timeLeft = this.state.hideTime;
     }
+    this.syncMetadata(); // drop off the public browser while the match runs
     console.log(
       `[BlackoutRoom] match started — ${this.solo ? "solo/AI" : "MP hunter=" + hunterId} searchers=${searcherCount} items=${this.state.items.size}`,
     );
@@ -522,12 +714,14 @@ export class BlackoutRoom extends Room<GameState> {
     } else if (s.phase === Phase.LIGHTS_ON) {
       s.phase = Phase.BLACKOUT;
       s.timeLeft = s.roundTime;
+      this.blackoutAt = Date.now(); // Night Report escape-time baseline
       this.setHunterHidden(false); // the hunt begins — the Caretaker reappears
       this.applyRoles("blackout"); // the Hunter's identity is exposed at blackout
     } else if (s.phase === Phase.BLACKOUT) {
-      s.phase = Phase.ENDED; // timed out — survivors who didn't escape are stuck
-      s.timeLeft = CONFIG.ROUND_END_S;
-      this.applyRoles("end");
+      // Timed out — survivors still inside count as caught: the night ran out on
+      // them. Run the same escape quota as any other ending so a winner is set.
+      this.resolveTimeout();
+      return; // endRound already advanced the phase + set the timer
     } else if (s.phase === Phase.ENDED) {
       s.phase = Phase.CAMPFIRE; // regroup
       s.timeLeft = CONFIG.CAMPFIRE_S;
@@ -535,6 +729,7 @@ export class BlackoutRoom extends Room<GameState> {
       this.startMatch(); // auto-rematch when the campfire timer runs out
       return;
     }
+    this.syncMetadata();
     console.log(`[BlackoutRoom] phase → ${s.phase}`);
   }
 
@@ -548,7 +743,17 @@ export class BlackoutRoom extends Room<GameState> {
       // AI Caretaker only in solo; in multiplayer a human is the Hunter.
       if (this.solo) {
         if (!s.caretaker.active) this.ai.activate(s, DEFAULT_MAP.hunterSpawn);
-        this.ai.update(dt, s, (id) => this.isRunning(id), (id) => this.onCatch(id));
+        this.ai.update(
+          dt,
+          s,
+          (id) => this.isRunning(id),
+          (id) => this.onCatch(id),
+          // Co-op + traitor: the AI never hunts its own ally (the human Hunter
+          // can't melee the traitor either) — nor a body in reconnection grace.
+          (id) =>
+            this.roles.get(id) !== Role.TRAITOR &&
+            (this.state.players.get(id)?.connected ?? true),
+        );
         // First sighting: the Caretaker roars when it acquires a target (a
         // transition into chase/attack from a calmer state). Throttled.
         const now = Date.now();
@@ -584,11 +789,25 @@ export class BlackoutRoom extends Room<GameState> {
       return;
     }
     p.downed = true;
+    if (!this.caughtOrder.includes(id)) this.caughtOrder.push(id); // Night Report: "The Bait"
   }
 
   private isRunning(id: string): boolean {
     const r = this.running.get(id);
     return !!r && r.running && Date.now() - r.at < 400;
+  }
+
+  /** BLACKOUT timer expiry: anyone still inside is counted as caught, then the
+   *  usual quota decides the night (≥ half escaped → searchers). */
+  private resolveTimeout() {
+    let total = 0;
+    let escaped = 0;
+    this.state.players.forEach((p) => {
+      if (this.roles.get(p.id) !== Role.SEARCHER) return;
+      total++;
+      if (p.escaped) escaped++;
+    });
+    this.endRound(total > 0 && escaped * 2 >= total ? "searchers" : "hunter");
   }
 
   private endRound(outcome: "hunter" | "searchers") {
@@ -598,7 +817,61 @@ export class BlackoutRoom extends Room<GameState> {
     this.state.timeLeft = CONFIG.ROUND_END_S; // result splash, then → campfire
     this.applyRoles("end"); // reveal the Traitor at the end
     this.ai.deactivate(this.state);
+    this.broadcast("nightReport", { lines: this.buildNightReport() });
+    this.syncMetadata();
     console.log(`[BlackoutRoom] round over — ${outcome} win`);
+  }
+
+  /** Night Report — end-of-round superlatives (the campfire's comedy beat).
+   *  Computed from server-side tallies so every client sees the same report. */
+  private buildNightReport(): Array<{ title: string; name: string; detail: string }> {
+    const lines: Array<{ title: string; name: string; detail: string }> = [];
+    const nameOf = (id: string) => this.state.players.get(id)?.name ?? "someone";
+    const nonHunters = [...this.state.players.values()].filter(
+      (p) => this.roles.get(p.id) !== Role.HUNTER,
+    );
+    const top = (m: Map<string, number>, floor: number): { id: string; v: number } | null => {
+      let bi = "";
+      let bv = floor;
+      for (const p of nonHunters) {
+        const v = m.get(p.id) ?? 0;
+        if (v > bv) {
+          bv = v;
+          bi = p.id;
+        }
+      }
+      return bi ? { id: bi, v: bv } : null;
+    };
+
+    const run = top(this.nightRun, 6);
+    if (run) lines.push({ title: "Loudest Sneaker", name: nameOf(run.id), detail: `${Math.round(run.v)}s of sprinting` });
+    const hid = top(this.nightHidden, 8);
+    if (hid) lines.push({ title: "The Ghost", name: nameOf(hid.id), detail: `${Math.round(hid.v)}s in lockers` });
+    if (this.caughtOrder.length > 0) {
+      lines.push({ title: "The Bait", name: nameOf(this.caughtOrder[0]), detail: "first one caught" });
+    }
+    let fid = "";
+    let fv = Infinity;
+    for (const [id, t] of this.escapeTimes) {
+      if (t < fv) {
+        fv = t;
+        fid = id;
+      }
+    }
+    if (fid) lines.push({ title: "Track Star", name: nameOf(fid), detail: `out in ${fv.toFixed(1)}s` });
+    if (nonHunters.length >= 3) {
+      let qi = "";
+      let qv = Infinity;
+      for (const p of nonHunters) {
+        const v = this.nightRun.get(p.id) ?? 0;
+        if (v < qv) {
+          qv = v;
+          qi = p.id;
+        }
+      }
+      if (qi && qv < 3) lines.push({ title: "Quietest Feet", name: nameOf(qi), detail: "barely made a sound" });
+    }
+    return lines.slice(0, 4);
   }
 
   /** Hunter-/auto-placed loot: required items + golden brick (NOT flashlights). */
@@ -667,6 +940,7 @@ export class BlackoutRoom extends Room<GameState> {
     this.state.phase = Phase.LOBBY;
     this.state.timeLeft = 0;
     this.state.outcome = "";
+    this.state.dare = "";
     this.state.deposited = 0;
     this.state.doorsOpen = false;
     this.roles.clear();
@@ -679,12 +953,14 @@ export class BlackoutRoom extends Room<GameState> {
     this.pending = [];
     this.clearSabotage();
     this.ai.deactivate(this.state);
+    this.syncMetadata();
     console.log(`[BlackoutRoom] returned to lobby`);
   }
 
   // ---- Movement ----
 
   private handleMove(client: Client, msg: MoveMsg) {
+    if (!msg) return; // a payload-less "move" must not throw in the room
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
     if (player.downed || player.escaped) return; // out of the round
@@ -692,12 +968,11 @@ export class BlackoutRoom extends Room<GameState> {
       return;
     }
 
-    // Phase freeze: only the Hunter is in the map during HIDE; the Hunter is
-    // frozen during LIGHTS ON while searchers scout.
+    // Phase freeze: the Hunter is frozen during LIGHTS ON while searchers scout.
+    // (Searchers roam during HIDE too — disoriented, items/Hunter unseen.)
     const role = this.roles.get(client.sessionId);
     const ph = this.state.phase;
     if (role === Role.HUNTER && ph === Phase.LIGHTS_ON) return;
-    if (role !== Role.HUNTER && ph === Phase.HIDE) return; // searchers + traitor wait out HIDE
 
     const now = Date.now();
     const last = this.lastMoveAt.get(client.sessionId) ?? now;
@@ -706,11 +981,19 @@ export class BlackoutRoom extends Room<GameState> {
 
     player.light = !!msg.light;
 
+    // Night Report tally clock (searchers only; capped so gaps don't spike it).
+    const tallyDt =
+      role !== Role.HUNTER
+        ? Math.min(0.25, (now - (this.nightMoveAt.get(client.sessionId) ?? now)) / 1000)
+        : 0;
+    if (role !== Role.HUNTER) this.nightMoveAt.set(client.sessionId, now);
+
     // Hiding in a locker: hold position, just record facing + hidden flag.
     player.hidden = !!msg.hidden;
     if (player.hidden) {
       player.ry = msg.ry;
       this.running.set(client.sessionId, { running: false, at: now });
+      this.nightHidden.set(client.sessionId, (this.nightHidden.get(client.sessionId) ?? 0) + tallyDt);
       return;
     }
 
@@ -720,10 +1003,11 @@ export class BlackoutRoom extends Room<GameState> {
 
     // Running = loud: flag it for the Caretaker's hearing.
     const reqSpeed = Math.hypot(tx - player.x, tz - player.z) / dt;
-    this.running.set(client.sessionId, {
-      running: reqSpeed > CONFIG.SEARCHER_WALK + 1,
-      at: now,
-    });
+    const isRunning = reqSpeed > CONFIG.SEARCHER_WALK + 1;
+    this.running.set(client.sessionId, { running: isRunning, at: now });
+    if (isRunning && role !== Role.HUNTER && this.state.phase === Phase.BLACKOUT) {
+      this.nightRun.set(client.sessionId, (this.nightRun.get(client.sessionId) ?? 0) + tallyDt);
+    }
 
     // Anti-cheat: limit horizontal displacement to the max legal speed.
     const maxStep = MAX_SPEED * dt * SPEED_TOLERANCE + 0.05;
@@ -742,13 +1026,20 @@ export class BlackoutRoom extends Room<GameState> {
     player.y = clamp(msg.y, 0, MAX_Y);
     player.ry = msg.ry;
 
-    // Only searchers interact with items / the pad / the exit.
-    if (role !== Role.HUNTER) {
+    // Only searchers interact with items / the pad / the exit — and objective
+    // progress only counts during the hunt. LIGHTS_ON is for scouting; HIDE is
+    // for wandering lost. Without this gate a team could deposit (or even
+    // escape) before the Caretaker is ever released.
+    const hunting = ph === Phase.BLACKOUT || ph === Phase.ESCAPE;
+    if (role !== Role.HUNTER && hunting) {
       this.tryDeposit(player);
       // The slam temporarily bars the exit; the slammer can never escape (trapped).
       const escapeOpen = this.state.slamFor <= 0 && player.id !== this.slamTrappedId;
       if (escapeOpen && this.state.doorsOpen && !player.escaped && inZone(player.x, player.z, EXIT)) {
         player.escaped = true;
+        if (this.blackoutAt > 0) {
+          this.escapeTimes.set(player.id, Math.round((Date.now() - this.blackoutAt) / 100) / 10);
+        }
         console.log(`[BlackoutRoom] ${player.name} escaped!`);
         // Real-time moment (§9): escapee gets "You made it", others a "[Name] escaped" toast.
         this.broadcast("escaped", { id: player.id, name: player.name });
@@ -959,6 +1250,8 @@ export class BlackoutRoom extends Room<GameState> {
     if (!accuser) return;
     const accuserName = accuser.name;
     const correct = this.roles.get(targetId) === Role.TRAITOR;
+    // Private ack → the accuser's profile stats (name-matching the broadcast is fragile).
+    this.clients.find((c) => c.sessionId === accuserId)?.send("accuseResult", { correct });
 
     if (correct) {
       const traitor = this.state.players.get(targetId);
@@ -1134,7 +1427,8 @@ export class BlackoutRoom extends Room<GameState> {
     let bestD = CONFIG.MELEE_RANGE + 0.7;
     this.state.players.forEach((p) => {
       if (this.roles.get(p.id) !== Role.SEARCHER) return;
-      if (p.downed || p.escaped || p.hidden) return;
+      if (p.downed || p.escaped || p.hidden || !p.connected) return;
+      if (Math.abs(p.y - h.y) > CONFIG.MELEE_MAX_DY) return; // no hits through the booth floor
       const dx = p.x - h.x;
       const dz = p.z - h.z;
       const d = Math.hypot(dx, dz);
@@ -1148,24 +1442,28 @@ export class BlackoutRoom extends Room<GameState> {
   }
 
   // Optional axe throw: long-range but wildly inaccurate — even with a searcher
-  // lined up it's a coin flip, on a 5s recharge. Host-toggled via state.axeThrows.
+  // lined up it's a coin flip. A SCARCE gamble: AXE_POOL throws per match total,
+  // on a recharge between throws. Host-toggled via state.axeThrows.
   private handleAxe(client: Client) {
     if (!this.state.axeThrows) return;
     if (this.roles.get(client.sessionId) !== Role.HUNTER) return;
     const ph = this.state.phase;
     if (ph !== Phase.BLACKOUT && ph !== Phase.ESCAPE) return;
+    if (this.axesLeft <= 0) return; // out of axes for the night
     const h = this.state.players.get(client.sessionId);
     if (!h) return;
     const now = Date.now();
     if (now - (this.lastAxe.get(client.sessionId) ?? 0) < CONFIG.AXE_COOLDOWN_S * 1000) return;
     this.lastAxe.set(client.sessionId, now);
+    this.axesLeft--;
 
     // Acquire the nearest searcher in the throw arc.
     let best: Player | undefined;
     let bestD: number = CONFIG.AXE_RANGE;
     this.state.players.forEach((p) => {
       if (this.roles.get(p.id) !== Role.SEARCHER) return;
-      if (p.downed || p.escaped || p.hidden) return;
+      if (p.downed || p.escaped || p.hidden || !p.connected) return;
+      if (Math.abs(p.y - h.y) > CONFIG.MELEE_MAX_DY) return; // no throws through the booth floor
       const dx = p.x - h.x;
       const dz = p.z - h.z;
       const d = Math.hypot(dx, dz);
@@ -1178,7 +1476,7 @@ export class BlackoutRoom extends Room<GameState> {
 
     const hit = !!best && Math.random() < CONFIG.AXE_HIT_CHANCE; // 50/50
     if (hit && best) this.onCatch(best.id); // checkRoundEnd runs on the next tick
-    client.send("axe", { hit, hadTarget: !!best });
+    client.send("axe", { hit, hadTarget: !!best, left: this.axesLeft });
     // MP-consistent world sound: the whoosh/thud at the thrower's position.
     this.broadcast("sound", { soundId: "axe", x: h.x, z: h.z });
   }
@@ -1203,7 +1501,7 @@ export class BlackoutRoom extends Room<GameState> {
     });
     this.state.deposited = d;
     this.maybeStingNo({ x: PAD.x, z: PAD.z }); // progress against the Caretaker → "no"
-    if (d >= CONFIG.REQUIRED_ITEMS && !this.state.doorsOpen) {
+    if (d >= this.state.requiredItems && !this.state.doorsOpen) {
       this.state.doorsOpen = true;
       console.log(`[BlackoutRoom] all items deposited — front doors unlocked`);
       // MP-consistent world sound: the front doors unlocking, heard by everyone.
@@ -1231,6 +1529,12 @@ export class BlackoutRoom extends Room<GameState> {
     // The Caretaker's side wins the night if FEWER THAN HALF the searchers escape
     // (§3). Individual escapees still "won by escaping" regardless (results screen).
     if (total > 0 && done === total) this.endRound(escaped * 2 >= total ? "searchers" : "hunter");
+  }
+
+  /** Contain handler exceptions: a malformed message must never take down the
+   *  room (or the process hosting every other match). */
+  onUncaughtException(err: Error, methodName: string) {
+    console.error(`[BlackoutRoom] uncaught exception in ${methodName}:`, err);
   }
 
   onDispose() {

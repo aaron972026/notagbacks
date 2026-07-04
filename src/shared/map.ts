@@ -121,6 +121,29 @@ for (const [id, x1, z1, x2, z2] of ROOMS_JSON) {
 export type RoomRect = Rect;
 export const ROOM_RECTS: RoomRect[] = Array.from(ROOMS.values());
 
+/** Player-facing room names — MAP data, not UI copy (a second map ships its own
+ *  labels; shared UI code must never hard-code these). */
+export const ROOM_LABELS: Record<string, string> = {
+  lobby: "Lobby",
+  mens: "Men's room",
+  womens: "Women's room",
+  gym: "Gymnasium",
+  admin_booth: "Admin booth",
+  entry_corridor: "Theatre corridor",
+  maintenance: "Maintenance",
+  workshop: "Workshop",
+  theatre: "Theatre",
+  lighting_booth: "Lighting booth",
+  stage: "Stage",
+  back_hall: "Back hall",
+  green_room: "Green room",
+  masks_closet: "Costume closet",
+  dressing_room: "Dressing room",
+  kitchen: "Kitchen",
+  small_hall: "Side hall",
+  east_hall: "East hall",
+};
+
 /**
  * SOLO loot variation — each required item (and the golden brick) can spawn in any
  * of several rooms, picked fresh each solo game so the hunt isn't always identical.

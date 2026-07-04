@@ -41,6 +41,10 @@ const NODES: Pt[] = [
   { x: W(35), z: Wz(49) }, // lobby
   { x: W(10), z: Wz(10) }, // back west
   { x: W(56), z: Wz(10) }, // back east
+  { x: W(7), z: Wz(49) }, // mens — no more AI-blind restroom pocket
+  { x: W(18), z: Wz(49) }, // womens
+  { x: W(21), z: Wz(37) }, // small hall (kitchen link)
+  { x: W(32), z: Wz(43) }, // entry corridor
 ];
 
 const CELL = 0.75;

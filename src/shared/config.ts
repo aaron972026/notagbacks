@@ -11,18 +11,12 @@
  */
 
 export const CONFIG = {
-  // ---- Mode ----
-  // "solo": 1 human searcher + AI Caretaker + auto-placed loot (the test build).
-  // "multiplayer": human Caretaker hides loot in HIDE phase; human searchers.
-  MODE: "solo" as "solo" | "multiplayer",
-  AI_SEARCHER_BOTS: 0,
-
   // ---- Players & roles ----
   MIN_PLAYERS: 4,
   MAX_PLAYERS: 11, // 1 Hunter + up to 10 Searchers
 
   // ---- Phase timings (seconds) — DEFAULTS; the host can adjust per game in the lobby ----
-  HIDE_PHASE_S: 120, // Hunter-only setup phase (place the items)
+  HIDE_PHASE_S: 60, // Hunter setup phase (place the items); searchers roam, disoriented
   LIGHTS_ON_S: 30, // Searchers scout with full lighting; Hunter frozen
   ROUND_MAX_S: 300, // search/escape time before the round times out
   ROUND_END_S: 6, // result splash duration before the campfire
@@ -31,7 +25,8 @@ export const CONFIG = {
   // ---- Items & objectives ----
   REQUIRED_ITEMS: 3, // e.g. keys, gas tank, radio
   GOLDEN_BRICKS: 1, // extra-life / revive token
-  // Flashlights handed out = searchers - 1 (one searcher must always buddy up).
+  // "Buddy-up" flashlight scarcity (host option): searchers - 1 flashlights, so
+  // one searcher must always buddy up. Off (default) = one per searcher.
   flashlightsFor: (searcherCount: number) => Math.max(0, searcherCount - 1),
 
   // ---- Movement (units/second) ----
@@ -49,10 +44,12 @@ export const CONFIG = {
 
   // ---- Combat ----
   MELEE_RANGE: 2, // forward raycast kill range for the hunter
+  MELEE_MAX_DY: 1.2, // max height difference for a hit — no killing through the booth floor
   // Axe throw (optional, host-toggled): a long-range gamble — wildly inaccurate.
   AXE_RANGE: 9, // how far an axe can reach a target
   AXE_HIT_CHANCE: 0.5, // very inaccurate — 50/50 to eliminate even with a target lined up
   AXE_COOLDOWN_S: 5, // recharge between throws
+  AXE_POOL: 3, // total throws per match — a scarce gamble, not a ranged spam tool
 
   // ---- Flashlight ----
   FLASHLIGHT_BATTERY_S: 0, // 0 = unlimited; otherwise seconds of charge
@@ -68,10 +65,9 @@ export const CONFIG = {
   // ---- Hunter sabotage cooldowns (seconds) ----
   HUNTER_DOOR_LOCK_CD_S: 40,
   HUNTER_BLACKOUT_CD_S: 30,
-  HUNTER_SCARE_CD_S: 15,
 
   // ---- Traitor powers (tunable) ----
-  TRAITOR_DRAIN_RANGE: 2, // m — must be right next to the victim
+  TRAITOR_DRAIN_RANGE: 3.5, // m — close range, so "who was standing near me?" stays a real tell
   TRAITOR_DRAIN_CD_S: 25, // cooldown
   TRAITOR_DRAIN_BLIND_S: 25, // how long the drained flashlight stays dead
   TRAITOR_MARK_RANGE: 4, // m — proximity to mark a searcher
@@ -81,26 +77,23 @@ export const CONFIG = {
   // ---- Accusation / public hearing (tunable) ----
   ACCUSE_BEAT_S: 2.5, // dramatic beat between the claim and the verdict
   ACCUSE_MINIMAP_REVEAL_S: 45, // correct guess → Caretaker shown on the minimap
-  ACCUSE_FALSE_PENALTY_S: 300, // wrong guess → accuser visible to the Caretaker (~rest of match)
+  ACCUSE_FALSE_PENALTY_S: 180, // wrong guess → accuser visible to the Caretaker (strong, but not the whole match)
 
   // ---- AI Caretaker (solo) ----
   AI_VISION_RANGE: 14,
   AI_VISION_FOV: 120, // degrees (full cone)
   AI_VISION_RANGE_LIT_BONUS: 8, // extra range when the target's flashlight is ON
-  AI_REACTION_S: 0.45, // delay before committing to a fresh sighting
+  AI_REACTION_S: 0.45, // NOT YET IMPLEMENTED (AI spec §8): sighting-commit delay
   AI_INVESTIGATE_S: 8, // time spent poking around a last-known position
   AI_SEARCH_S: 6, // sweep time after losing a chase before giving up
   AI_GIVEUP_S: 4, // lose-of-sight grace before dropping from CHASE to SEARCH
   AI_AWARE_INVESTIGATE: 40, // awareness threshold to go investigate
   AI_AWARE_DECAY: 18, // awareness lost per second with no stimulus
   AI_MELEE_COOLDOWN_S: 1.2,
-  AI_HEARS_HIDDEN_RADIUS: 2,
+  AI_MELEE_WINDUP_S: 0.4, // swing wind-up — the player's dodge window (AI spec §8)
+  AI_HEARS_HIDDEN_RADIUS: 2, // hidden-breath leak: passing this close to an occupied locker raises awareness
   AI_GUARD_PAD_THRESHOLD: 2, // once this many items are deposited (exit unlockable), the AI biases toward guarding the back EXIT + its approaches
   CARETAKER_RADIUS: 0.5,
-
-  // ---- Mode toggles ----
-  HIDDEN_HUNTER: true, // hide the Hunter's identity until blackout
-  TRAITORS: 0, // 0 = Classic; 1 = Traitor mode (recommend 6+ players)
 
   // ---- Physics / first-person feel (engine-side, not in the design table) ----
   EYE_HEIGHT: 1.7, // standing first-person camera height (units)
@@ -111,9 +104,12 @@ export const CONFIG = {
   GRAVITY: 22, // downward acceleration (units/s^2)
 
   // ---- Networking ----
+  // Client/server deploy separately — bump this on ANY schema or message-shape
+  // change so a stale client gets "update required" instead of silent desync.
+  PROTOCOL_VERSION: 3,
   SERVER_PORT: 2567,
   PATCH_RATE_HZ: 20, // state broadcast frequency
-  SIM_RATE_HZ: 60, // server simulation tick
+  SIM_RATE_HZ: 20, // server simulation tick (BlackoutRoom derives its interval from this)
 } as const;
 
 /** Match lifecycle phases. */
@@ -150,11 +146,41 @@ export const REQUIRED_ITEM_KINDS: ItemKind[] = [
   ItemKind.GAS_TANK,
 ];
 
-/** Game modes. */
-export enum GameMode {
-  CLASSIC = "classic", // Hunter vs Searchers (optional hidden Hunter)
-  TRAITOR = "traitor", // adds one traitor among the searchers
-}
+/**
+ * Cosmetic masks (retention unlocks). The server only VALIDATES ids against
+ * this whitelist — unlock progress lives client-side (no accounts yet), so a
+ * modified client could wear any mask; they're cosmetic, that's acceptable.
+ * "" = no mask (default). Names/feats live client-side in profile.ts.
+ */
+export const MASK_IDS = [
+  "comedy",
+  "tragedy",
+  "plague",
+  "rabbit",
+  "paperbag",
+  "moth",
+] as const;
+export type MaskId = (typeof MASK_IDS)[number] | "";
+
+/** Equippable titles = feat ids (display names live client-side in profile.ts;
+ *  a test pins the two lists together). Server only whitelist-validates. */
+export const TITLE_IDS = [
+  "first_escape",
+  "ten_escapes",
+  "caught_ten",
+  "medic",
+  "detective",
+  "blind_faith",
+  "catch_me",
+  "nerves",
+  "shutout",
+  "wolf",
+  "dare_devil",
+] as const;
+
+/** Tonight's Dare — a per-round bonus objective the server announces; the
+ *  client tracks completion locally (like feats). Copy lives client-side. */
+export const DARE_IDS = ["brick_escape", "locker_hopper", "no_sprint", "loud_mouth"] as const;
 
 /** How the host assigns the Hunter between rounds. */
 export enum HunterMode {

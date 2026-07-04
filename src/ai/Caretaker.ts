@@ -28,6 +28,7 @@ export class CaretakerAI {
   private path: Pt[] = [];
   private repathT = 0;
   private meleeReadyAt = 0;
+  private windupUntil = 0; // >0 while a swing is winding up (the dodge window)
   private investigateUntil = 0;
   private searchUntil = 0;
   private guard = false; // endgame: bias toward the back exit + its approaches
@@ -58,6 +59,7 @@ export class CaretakerAI {
     this.path = [];
     this.investigateUntil = 0;
     this.searchUntil = 0;
+    this.windupUntil = 0;
   }
 
   update(
@@ -65,6 +67,7 @@ export class CaretakerAI {
     state: GameState,
     runningOf: (id: string) => boolean,
     onCatch: (id: string) => void,
+    targetable: (id: string) => boolean = () => true,
   ) {
     const c = state.caretaker;
     if (!c.active) return;
@@ -77,9 +80,10 @@ export class CaretakerAI {
     let seenD = Infinity;
     state.players.forEach((p) => {
       if (p.downed) return;
+      if (!targetable(p.id)) return; // e.g. the traitor — the Caretaker's ally
       const d = Math.hypot(p.x - me.x, p.z - me.z);
 
-      // Hearing (hidden players are silent in v1).
+      // Hearing.
       if (!p.hidden) {
         if (runningOf(p.id) && d <= CONFIG.RUN_AUDIBLE_RADIUS) {
           this.awareness = Math.min(100, this.awareness + (50 * (1 - d / CONFIG.RUN_AUDIBLE_RADIUS) + 10) * dt);
@@ -88,10 +92,18 @@ export class CaretakerAI {
           this.awareness = Math.min(100, this.awareness + 18 * dt);
           this.lkp = { x: p.x, z: p.z };
         }
+      } else if (d <= CONFIG.AI_HEARS_HIDDEN_RADIUS) {
+        // Hidden-breath leak (AI spec §6): a locker is NOT absolute safety — pass
+        // right beside an occupied one and something is faintly audible. He can't
+        // see or strike a hidden player; he just comes to linger. Dread as counter-
+        // pressure against locker camping.
+        this.awareness = Math.min(100, this.awareness + 30 * dt);
+        this.lkp = { x: p.x, z: p.z };
       }
 
       // Sight: range (+lit bonus), LOS clear, within FOV (or beam visible).
       if (p.hidden) return;
+      if (p.y > CONFIG.MELEE_MAX_DY) return; // elevated (booth) — the 2D AI can't see or reach up there
       const range = CONFIG.AI_VISION_RANGE + (p.light ? CONFIG.AI_VISION_RANGE_LIT_BONUS : 0);
       if (d > range) return;
       if (!this.nav.losClear(me.x, me.z, p.x, p.z)) return;
@@ -116,27 +128,34 @@ export class CaretakerAI {
     }
 
     // ---- Decide state + target ----
-    let target: Pt | null = null;
-    let st = "patrol";
+    let target: Pt | null;
+    let st: string;
     const chaseP = this.chaseId ? state.players.get(this.chaseId) : undefined;
 
     if (chaseP && !chaseP.downed && this.t - this.lastSeen < CONFIG.AI_GIVEUP_S) {
       const d = Math.hypot(chaseP.x - me.x, chaseP.z - me.z);
-      if (d <= CONFIG.MELEE_RANGE + CONFIG.CARETAKER_RADIUS) {
-        // ATTACK
+      if (d <= CONFIG.MELEE_RANGE + CONFIG.CARETAKER_RADIUS && chaseP.y <= CONFIG.MELEE_MAX_DY) {
+        // ATTACK — with a WINDUP (AI spec §8): the swing takes a beat to land,
+        // and that beat is the player's dodge window. Sprinting clear of the
+        // range before it lands = a whiffed swing, not a coin-flip death.
         c.aiState = "attack";
         c.ry = Math.atan2(-(chaseP.x - me.x), -(chaseP.z - me.z));
-        if (this.t >= this.meleeReadyAt) {
+        if (this.windupUntil === 0 && this.t >= this.meleeReadyAt) {
+          this.windupUntil = this.t + CONFIG.AI_MELEE_WINDUP_S; // raise the arm…
+        } else if (this.windupUntil > 0 && this.t >= this.windupUntil) {
+          this.windupUntil = 0;
           this.meleeReadyAt = this.t + CONFIG.AI_MELEE_COOLDOWN_S;
-          onCatch(chaseP.id); // room decides: golden-brick save vs. downed
+          onCatch(chaseP.id); // …and it lands (room decides: brick save vs downed)
           this.chaseId = null;
         }
         return; // hold position during the swing
       }
+      this.windupUntil = 0; // target slipped out mid-swing — the whiff
       st = "chase";
       target = { x: chaseP.x, z: chaseP.z };
       this.lkp = target;
     } else if (this.chaseId) {
+      this.windupUntil = 0;
       // Lost the target → SEARCH the last-known position, then give up.
       st = "search";
       if (this.searchUntil === 0) this.searchUntil = this.t + CONFIG.AI_SEARCH_S;
