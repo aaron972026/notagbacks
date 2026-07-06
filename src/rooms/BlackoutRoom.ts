@@ -781,7 +781,7 @@ export class BlackoutRoom extends Room<GameState> {
             const i = Math.floor(Math.random() * (TAUNT_SOUNDS.length - 1)); // skip sting_no
             this.broadcast("sound", { soundId: TAUNT_SOUNDS[i], x: s.caretaker.x, z: s.caretaker.z });
           }
-          this.nextAiTauntAt = now + 25_000 + Math.random() * 35_000;
+          this.nextAiTauntAt = now + 20_000 + Math.random() * 10_000;
         }
       }
       this.checkRoundEnd(); // resolves caught / escaped outcomes

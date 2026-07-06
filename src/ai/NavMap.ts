@@ -112,6 +112,23 @@ export class NavMap {
     return true;
   }
 
+  /** LOS with the obstacles inflated by `margin` — a corridor the Caretaker's
+   *  BODY can actually follow, not just a zero-width sight-line. Using plain
+   *  losClear for path smoothing let waypoints hug door jambs the 0.5 radius
+   *  couldn't squeeze past (he'd grind on the frame). */
+  losClearM(ax: number, az: number, bx: number, bz: number, margin: number): boolean {
+    for (const box of this.aabbs) {
+      const fat = {
+        minX: box.minX - margin,
+        maxX: box.maxX + margin,
+        minZ: box.minZ - margin,
+        maxZ: box.maxZ + margin,
+      };
+      if (segIntersectsAABB(ax, az, bx, bz, fat)) return false;
+    }
+    return true;
+  }
+
   /** Is a climbable WALL within `dist` of this point? (visual wall-crawl gate) */
   nearWall(x: number, z: number, dist: number): boolean {
     for (const b of this.wallBoxes) {
@@ -144,9 +161,10 @@ export class NavMap {
     return [i, j];
   }
 
-  /** Waypoints from `from` to `to`: direct if visible, else smoothed grid A*. */
+  /** Waypoints from `from` to `to`: direct if walkable, else smoothed grid A*. */
   path(from: Pt, to: Pt): Pt[] {
-    if (this.losClear(from.x, from.z, to.x, to.z)) return [to];
+    const m = CONFIG.CARETAKER_RADIUS * 0.9; // body corridor for path smoothing
+    if (this.losClearM(from.x, from.z, to.x, to.z, m)) return [to];
 
     const [si, sj] = this.nearestWalkable(this.ci(from.x), this.cj(from.z));
     const [gi, gj] = this.nearestWalkable(this.ci(to.x), this.cj(to.z));
@@ -207,11 +225,12 @@ export class NavMap {
     }
     cells.push(to);
 
-    // String-pull: keep a waypoint only where LOS would break.
+    // String-pull with the BODY corridor: keep a waypoint wherever the fat
+    // segment would clip an (inflated) obstacle — no more door-jamb hugging.
     const out: Pt[] = [];
     let anchor = from;
     for (let k = 1; k < cells.length; k++) {
-      if (!this.losClear(anchor.x, anchor.z, cells[k].x, cells[k].z)) {
+      if (!this.losClearM(anchor.x, anchor.z, cells[k].x, cells[k].z, m)) {
         out.push(cells[k - 1]);
         anchor = cells[k - 1];
       }

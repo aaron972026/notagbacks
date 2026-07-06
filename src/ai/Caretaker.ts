@@ -36,6 +36,7 @@ export class CaretakerAI {
   private rushed = false; // the one-shot doors-open sprint has been triggered
   private nearestPlayerD = Infinity; // distance to the closest live searcher this tick
   private wantClimb = false; // this patrol/investigate leg is taken ON the walls
+  private stuckTicks = 0; // consecutive sim ticks with both movement axes blocked
 
   constructor(private readonly nav: NavMap) {}
 
@@ -147,6 +148,7 @@ export class CaretakerAI {
       const s = seen as { id: string; x: number; z: number };
       this.awareness = 100;
       this.lkp = { x: s.x, z: s.z };
+      if (this.chaseId !== s.id) this.wantClimb = Math.random() < CONFIG.AI_CLIMB_CHANCE; // some chases run the walls
       this.chaseId = s.id;
       this.lastSeen = this.t;
     } else {
@@ -218,13 +220,15 @@ export class CaretakerAI {
     if (target) this.moveToward(c, me, target, dt);
 
     // Wall-crawl (visual state; pathing stays 2D): on climb-rolled legs he
-    // hugs the walls while patrolling/investigating/searching — never while
-    // chasing or attacking (he drops to close). Only shown when a wall is
-    // actually beside him, so the client can always find a surface to mount.
+    // takes the walls while prowling — and even mid-CHASE while he's still
+    // closing (he drops to the floor inside strike-approach range). Only shown
+    // when a wall is actually in reach for the client to mount him on.
+    const farChase =
+      st === "chase" && target ? Math.hypot(target.x - me.x, target.z - me.z) > 6 : false;
     c.climbing =
       this.wantClimb &&
-      (st === "patrol" || st === "investigate" || st === "search") &&
-      this.nav.nearWall(c.x, c.z, 1.6);
+      (st === "patrol" || st === "investigate" || st === "search" || farChase) &&
+      this.nav.nearWall(c.x, c.z, 2.2);
   }
 
   private pickPatrol(me: Pt): Pt {
@@ -288,7 +292,21 @@ export class CaretakerAI {
       c.z += nz;
       moved = true;
     }
-    if (moved) c.ry = Math.atan2(-nx, -nz);
+    if (moved) {
+      c.ry = Math.atan2(-nx, -nz);
+      this.stuckTicks = 0;
+    } else {
+      // Grinding on geometry (a door jamb, a platform corner): repath at once;
+      // if it persists, abandon the leg entirely and pick somewhere new.
+      this.stuckTicks++;
+      this.repathT = 0;
+      if (this.stuckTicks > 15) {
+        this.stuckTicks = 0;
+        this.patrolTarget = null;
+        this.path = [];
+        if (this.chaseId) this.lkp = { x: c.x, z: c.z }; // stop butting the wall mid-chase
+      }
+    }
   }
 }
 
