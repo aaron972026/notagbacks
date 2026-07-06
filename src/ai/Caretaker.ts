@@ -32,6 +32,8 @@ export class CaretakerAI {
   private investigateUntil = 0;
   private searchUntil = 0;
   private guard = false; // endgame: bias toward the back exit + its approaches
+  private doorsOpen = false;
+  private rushed = false; // the one-shot doors-open sprint has been triggered
 
   constructor(private readonly nav: NavMap) {}
 
@@ -60,6 +62,7 @@ export class CaretakerAI {
     this.investigateUntil = 0;
     this.searchUntil = 0;
     this.windupUntil = 0;
+    this.rushed = false;
   }
 
   update(
@@ -73,6 +76,23 @@ export class CaretakerAI {
     if (!c.active) return;
     this.t += dt;
     this.guard = state.deposited >= CONFIG.AI_GUARD_PAD_THRESHOLD || state.doorsOpen;
+    this.doorsOpen = state.doorsOpen;
+    // The endgame bell rings for the AI too: the INSTANT the doors open, break
+    // off whatever patrol/investigation he's on and head straight for the back
+    // door — the escape should be a race the searchers can SEE, not an empty
+    // hallway. (A live chase is already a race; don't interrupt that.)
+    if (state.doorsOpen && !this.rushed) {
+      this.rushed = true;
+      if (!this.chaseId) {
+        this.awareness = 0;
+        this.lkp = null;
+        this.investigateUntil = 0;
+        this.patrolTarget = EXIT_GUARD[1]; // the back-hall choke on the way to the door
+        this.path = [];
+        this.repathT = 0;
+      }
+    }
+    if (!state.doorsOpen) this.rushed = false;
     const me: Pt = { x: c.x, z: c.z };
 
     // ---- Perception ----
@@ -193,8 +213,18 @@ export class CaretakerAI {
 
   private pickPatrol(me: Pt): Pt {
     // Endgame (exit unlockable): pressure the far-back exit dash — haunt the back
-    // door + the corridor approaching it, not the front deposit pad.
-    if (this.guard && Math.random() < 0.8) return EXIT_GUARD[Math.floor(Math.random() * EXIT_GUARD.length)];
+    // door + the corridor approaching it, not the front deposit pad. Once the
+    // doors are OPEN he never wanders: he paces doorway ↔ corridor choke (always
+    // heading for whichever guard point is farther), so approaching searchers see
+    // him patrolling the exit and have to time their dash through the gap.
+    if (this.guard && (this.doorsOpen || Math.random() < 0.8)) {
+      if (this.doorsOpen) {
+        return EXIT_GUARD.reduce((a, b) =>
+          Math.hypot(a.x - me.x, a.z - me.z) > Math.hypot(b.x - me.x, b.z - me.z) ? a : b,
+        );
+      }
+      return EXIT_GUARD[Math.floor(Math.random() * EXIT_GUARD.length)];
+    }
     const nodes = this.nav.nodeList();
     let best = nodes[0];
     let bestScore = -Infinity;
@@ -222,7 +252,9 @@ export class CaretakerAI {
     const dx = wp.x - me.x;
     const dz = wp.z - me.z;
     const len = Math.hypot(dx, dz) || 1;
-    const step = CONFIG.HUNTER_SPEED * dt;
+    // Doors open → he hurries (still slower than a running searcher: the race
+    // is winnable, he's just visibly closing).
+    const step = CONFIG.HUNTER_SPEED * (this.doorsOpen ? CONFIG.AI_ENDGAME_RUSH_MULT : 1) * dt;
     const nx = (dx / len) * step;
     const nz = (dz / len) * step;
     const m = CONFIG.CARETAKER_RADIUS;

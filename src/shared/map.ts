@@ -64,6 +64,10 @@ export interface BlackoutMap {
   exit: Zone; // front-door escape trigger (used once doors unlock)
   barredDoor: MapBox; // solid collider blocking the front doors until unlock
   booth: { platform: MapBox; stairs: MapBox[]; walls: MapBox[]; floorY: number; access: Zone };
+  /** The raised stage in the theatre: platform slab + walkable step boxes (all
+   *  colliders). The AI nav treats them as obstacles — the AI hunts AROUND the
+   *  stage; players can climb it (each step rise ≤ the 0.35 step-offset). */
+  stagePlatform: MapBox[];
   searcherSpawns: Vec3[];
   hunterSpawn: Vec3;
   requiredLoot: LootAnchor[];
@@ -91,8 +95,12 @@ const wz = (z: number) => z - CZ;
 type Rect = { id: string; x1: number; z1: number; x2: number; z2: number };
 const ROOMS_JSON: Array<[string, number, number, number, number]> = [
   ["lobby", 24, 46, 46, 52],
-  ["mens", 2, 46, 12, 52],
-  ["womens", 12, 46, 24, 52],
+  // Restrooms: two rooms stacked along the lobby's west wall, EACH with its
+  // own lobby-facing door (side by side, signed MEN / WOMEN) — nobody walks
+  // through one to reach the other, and there's no service-hall shortcut.
+  // 10 m deep (x 14..24): real restroom proportions, no bowling-alley corridor.
+  ["mens", 14, 46, 24, 49],
+  ["womens", 14, 49, 24, 52],
   ["gym", 46, 34, 64, 52],
   ["admin_booth", 18, 40, 24, 46], // start at x=18 so it doesn't overlap the kitchen
   ["entry_corridor", 24, 40, 40, 46],
@@ -134,7 +142,7 @@ export const ROOM_LABELS: Record<string, string> = {
   workshop: "Workshop",
   theatre: "Theatre",
   lighting_booth: "Lighting booth",
-  stage: "Stage",
+  stage: "Backstage",
   back_hall: "Back hall",
   green_room: "Green room",
   masks_closet: "Costume closet",
@@ -192,7 +200,7 @@ export function roomIdAt(x: number, z: number): string {
 //                small_hall → theatre
 const DOORS: Array<[string, string]> = [
   ["lobby", "womens"],
-  ["womens", "mens"], // restrooms chain off the lobby (lobby↔mens isn't adjacent)
+  ["lobby", "mens"], // side-by-side restroom doors on the lobby's west wall
   ["lobby", "gym"],
   ["lobby", "entry_corridor"],
   ["gym", "east_hall"], // front→east-hall via the gym (lobby↔east_hall isn't adjacent)
@@ -530,6 +538,16 @@ function makeGlenmoor(): BlackoutMap {
     walls,
     doors,
     cover: generateCover(),
+    // The stage: a 0.9 m platform at the theatre's south end (audience faces it),
+    // front steps aligned with the seating aisle, and rear steps up to the
+    // center door through to BACKSTAGE (exit stage rear, through the curtain).
+    stagePlatform: [
+      { x: wx(35), y: 0.45, z: wz(21.5), w: 16, h: 0.9, d: 5, color: 0x4a3a28 }, // slab z -7..-2
+      { x: wx(35), y: 0.3, z: wz(24.3), w: 3, h: 0.6, d: 0.6, color: 0x4a3a28 }, // front step (0.6)
+      { x: wx(35), y: 0.15, z: wz(24.9), w: 3, h: 0.3, d: 0.6, color: 0x4a3a28 }, // front step (0.3)
+      { x: wx(35), y: 0.3, z: wz(18.6), w: 2.2, h: 0.6, d: 1.1, color: 0x4a3a28 }, // rear step (backstage side)
+      { x: wx(35), y: 0.15, z: wz(17.5), w: 2.2, h: 0.3, d: 1.1, color: 0x4a3a28 }, // rear step
+    ],
     decals: [sealed],
     lockers: generateLockers(),
     pad: { x: wx(35), z: wz(49), w: 4, d: 3 }, // extraction pad stays in the front lobby

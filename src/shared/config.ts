@@ -93,6 +93,7 @@ export const CONFIG = {
   AI_MELEE_WINDUP_S: 0.4, // swing wind-up — the player's dodge window (AI spec §8)
   AI_HEARS_HIDDEN_RADIUS: 2, // hidden-breath leak: passing this close to an occupied locker raises awareness
   AI_GUARD_PAD_THRESHOLD: 2, // once this many items are deposited (exit unlockable), the AI biases toward guarding the back EXIT + its approaches
+  AI_ENDGAME_RUSH_MULT: 1.15, // doors-open speed boost (4 → 4.6): closes ground visibly, still loses a clean footrace to a running searcher (6)
   CARETAKER_RADIUS: 0.5,
 
   // ---- Physics / first-person feel (engine-side, not in the design table) ----
@@ -106,7 +107,7 @@ export const CONFIG = {
   // ---- Networking ----
   // Client/server deploy separately — bump this on ANY schema or message-shape
   // change so a stale client gets "update required" instead of silent desync.
-  PROTOCOL_VERSION: 3,
+  PROTOCOL_VERSION: 5, // v5: raised stage platform + lobby-fronting restrooms (colliders/nav must match)
   SERVER_PORT: 2567,
   PATCH_RATE_HZ: 20, // state broadcast frequency
   SIM_RATE_HZ: 20, // server simulation tick (BlackoutRoom derives its interval from this)
@@ -159,8 +160,44 @@ export const MASK_IDS = [
   "rabbit",
   "paperbag",
   "moth",
+  // GLB masks (client renders from /assets/models/Glenmoor/masks/<id>.glb).
+  // These are STARTER masks — unlocked from the first launch (see profile.ts).
+  "clown",
+  "gasmask",
+  "fox",
+  "masquerade",
+  "anon",
 ] as const;
 export type MaskId = (typeof MASK_IDS)[number] | "";
+
+/**
+ * Modular character outfits (ithappy pack). The server stores one JSON string
+ * per player (category → piece name) and only FORMAT-validates it — the piece
+ * list (manifest.json) is client-side asset data, and outfits are cosmetic, so
+ * a modified client dressing itself in an unknown piece just renders nothing.
+ */
+export const OUTFIT_CATEGORIES = [
+  "Body", "Full_Body", "Hats", "Hairs", "Glasses", "Eyebrows",
+  "Mustache", "Outerwear", "Pants", "Shoe", "Gloves", "Backpack",
+] as const;
+export type OutfitCategory = (typeof OUTFIT_CATEGORIES)[number];
+
+/** Validate + canonicalize an outfit JSON string. Returns "" if malformed. */
+export function sanitizeOutfit(raw: string): string {
+  if (!raw || raw.length > 800) return "";
+  try {
+    const o: unknown = JSON.parse(raw);
+    if (typeof o !== "object" || o === null || Array.isArray(o)) return "";
+    const out: Record<string, string> = {};
+    for (const cat of OUTFIT_CATEGORIES) {
+      const v = (o as Record<string, unknown>)[cat];
+      if (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,48}$/.test(v)) out[cat] = v;
+    }
+    return Object.keys(out).length ? JSON.stringify(out) : "";
+  } catch {
+    return "";
+  }
+}
 
 /** Equippable titles = feat ids (display names live client-side in profile.ts;
  *  a test pins the two lists together). Server only whitelist-validates. */

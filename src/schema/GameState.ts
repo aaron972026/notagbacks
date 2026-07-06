@@ -12,6 +12,7 @@ export class Player extends Schema {
   @type("string") name = "";
   @type("string") mask = ""; // cosmetic mask id (validated against MASK_IDS)
   @type("string") title = ""; // earned title (feat id, validated against TITLE_IDS)
+  @type("string") outfit = ""; // character outfit JSON (sanitized via sanitizeOutfit)
   @type("string") role: Role = Role.UNASSIGNED;
 
   // Position/orientation.

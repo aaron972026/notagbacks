@@ -1,5 +1,5 @@
 import { Room, Client } from "colyseus";
-import { CONFIG, MASK_IDS, TITLE_IDS, DARE_IDS, Phase, Role, HunterMode, REQUIRED_ITEM_KINDS, ItemKind } from "../shared/config";
+import { CONFIG, MASK_IDS, TITLE_IDS, DARE_IDS, Phase, Role, HunterMode, REQUIRED_ITEM_KINDS, ItemKind, sanitizeOutfit } from "../shared/config";
 import { DEFAULT_MAP, SOLO_LOOT_ROOMS, roomSpot, type DoorGap } from "../shared/map";
 
 const DOOR_LOCK_S = 45; // how long a slammed door stays locked, then it reopens
@@ -200,6 +200,12 @@ export class BlackoutRoom extends Room<GameState> {
       if (!p) return;
       const t = msg?.title ?? "";
       if (t === "" || (TITLE_IDS as readonly string[]).includes(t)) p.title = t;
+    });
+    // Character outfit — format-validated JSON (cosmetic; see sanitizeOutfit).
+    this.onMessage("setOutfit", (client, msg: { outfit?: string }) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      p.outfit = sanitizeOutfit(msg?.outfit ?? "");
     });
     this.onMessage("setRoomName", (client, msg: { name?: string }) => {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
