@@ -31,6 +31,7 @@ interface MoveMsg {
   crouch?: boolean;
   hidden?: boolean; // hiding in a locker
   light?: boolean; // flashlight currently ON
+  climb?: boolean; // Hunter clinging to a wall (visual state; y is still clamped)
 }
 
 // Max horizontal speed any player can legitimately reach (searcher run), plus a
@@ -1031,6 +1032,8 @@ export class BlackoutRoom extends Room<GameState> {
 
     player.y = clamp(msg.y, 0, MAX_Y);
     player.ry = msg.ry;
+    // Wall-climb is a Hunter ability — searchers can't spoof the pose flag.
+    player.climbing = role === Role.HUNTER && !!msg.climb;
 
     // Only searchers interact with items / the pad / the exit — and objective
     // progress only counts during the hunt. LIGHTS_ON is for scouting; HIDE is

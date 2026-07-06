@@ -33,6 +33,11 @@ export const CONFIG = {
   SEARCHER_RUN: 6, // searchers run — fast but LOUD
   SEARCHER_WALK: 3, // searchers walk — slow but QUIET
   HUNTER_SPEED: 4, // hunter only walks — between searcher run & walk
+  // Wall-climbing (Hunter only): push into a wall + hold Space/jump to scale it
+  // and cling. Capped well below the 4 m wall tops so he can never cross a wall
+  // — it's a perch (drop-scares, sight lines over cover), not a bypass.
+  HUNTER_CLIMB_SPEED: 2.2, // vertical climb rate (units/s)
+  HUNTER_CLIMB_MAX: 2.0, // max feet height while clinging
 
   // ---- Movement audio (audible radius, units) ----
   RUN_AUDIBLE_RADIUS: 12, // how far a running searcher can be heard

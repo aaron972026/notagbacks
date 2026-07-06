@@ -22,6 +22,7 @@ export class Player extends Schema {
   @type("number") ry = 0; // yaw
 
   @type("boolean") hidden = false; // hiding in a locker — don't render the avatar
+  @type("boolean") climbing = false; // Hunter clinging to a wall (visual: crawl pose)
   @type("boolean") connected = true; // false while in the reconnection grace window
   @type("boolean") downed = false; // caught by the Caretaker — spectating
   @type("boolean") light = false; // flashlight currently ON (drives AI detection)
