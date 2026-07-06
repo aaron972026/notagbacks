@@ -3,7 +3,7 @@ import { CONFIG, MASK_IDS, TITLE_IDS, DARE_IDS, Phase, Role, HunterMode, REQUIRE
 import { DEFAULT_MAP, SOLO_LOOT_ROOMS, roomSpot, type DoorGap } from "../shared/map";
 
 const DOOR_LOCK_S = 45; // how long a slammed door stays locked, then it reopens
-const KILL_LIGHTS_S = 8; // duration of the total kill-the-lights blackout (also kills flashlights)
+const KILL_LIGHTS_S = 4; // duration of the total kill-the-lights blackout (also kills flashlights) — short, sharp scare; 30s cooldown (HUNTER_BLACKOUT_CD_S)
 
 // Caretaker taunts (Hunter-triggered radial wheel). Index → sound bank id; the
 // client sends an index, the server maps it (never trusts a client soundId).
