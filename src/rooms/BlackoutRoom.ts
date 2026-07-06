@@ -84,6 +84,9 @@ export class BlackoutRoom extends Room<GameState> {
   private lastTaunt = new Map<string, number>();
   /** Next time the AI Caretaker taunts on its own (0 = timer not armed yet). */
   private nextAiTauntAt = 0;
+  /** AI Caretaker sabotage cooldowns (kill-lights, door-slam). */
+  private aiLastLights = 0;
+  private aiLastDoor = 0;
   /** Last drain timestamp per traitor (Drain the Light cooldown). */
   private lastDrain = new Map<string, number>();
   /** Last mark timestamp per traitor (Mark cooldown). */
@@ -783,6 +786,7 @@ export class BlackoutRoom extends Room<GameState> {
           }
           this.nextAiTauntAt = now + 20_000 + Math.random() * 10_000;
         }
+        this.aiSabotage(now); // kill-lights + door-slam, on their own cooldowns
       }
       this.checkRoundEnd(); // resolves caught / escaped outcomes
     } else if (s.caretaker.active) {
@@ -1089,42 +1093,66 @@ export class BlackoutRoom extends Room<GameState> {
     if (now - (this.lastSab.get(cdKey) ?? -1e9) < cd * 1000) return;
 
     if (kind === "door") {
-      // Slam the door the Hunter is FACING (not merely the nearest one):
-      // facing alignment dominates, distance only breaks ties.
-      let best: DoorGap | undefined;
-      let bestScore = Infinity;
-      for (const d of DEFAULT_MAP.doors) {
-        if (this.state.lockedDoors.includes(d.id)) continue;
-        if (!this.canLock(d)) continue; // never seal a room off completely
-        const px = d.axis === "v" ? d.line : d.center;
-        const pz = d.axis === "v" ? d.center : d.line;
-        const dist = Math.hypot(px - h.x, pz - h.z);
-        if (dist > 11) continue; // within reach
-        const toAng = Math.atan2(-(px - h.x), -(pz - h.z));
-        const ang = Math.abs(angleDiff(h.ry, toAng));
-        if (ang > 1.2) continue; // must be roughly in front of you
-        const score = ang + dist * 0.06;
-        if (score < bestScore) {
-          bestScore = score;
-          best = d;
-        }
-      }
-      if (!best) {
+      if (!this.lockDoorFacing(h.x, h.z, h.ry)) {
         client.send("sab", { kind, fail: "Face a door to slam it" });
         return; // don't start the cooldown
       }
-      this.state.lockedDoors.push(best.id);
-      this.doorExpiry.set(best.id, now + DOOR_LOCK_S * 1000);
-      // MP-consistent world sound: every client hears the slam at the door.
-      const dpx = best.axis === "v" ? best.line : best.center;
-      const dpz = best.axis === "v" ? best.center : best.line;
-      this.broadcast("sound", { soundId: "door_slam", x: dpx, z: dpz });
     } else if (kind === "lights") {
       this.state.lightsOutFor = KILL_LIGHTS_S;
     }
     this.lastSab.set(cdKey, now);
     client.send("sab", { kind }); // confirm → starts the client cooldown
     if (isTraitor) this.traitorWhisper(h); // any traitor power → quiet positional tell
+  }
+
+  /** Lock the lockable door best aligned with (x,z,ry): facing dominates,
+   *  distance breaks ties. Returns false if none is reachable + in front.
+   *  Shared by the human Hunter's slam and the AI Caretaker. */
+  private lockDoorFacing(x: number, z: number, ry: number, maxDist = 11, maxAng = 1.2): boolean {
+    let best: DoorGap | undefined;
+    let bestScore = Infinity;
+    for (const d of DEFAULT_MAP.doors) {
+      if (this.state.lockedDoors.includes(d.id)) continue;
+      if (!this.canLock(d)) continue; // never seal a room off completely
+      const px = d.axis === "v" ? d.line : d.center;
+      const pz = d.axis === "v" ? d.center : d.line;
+      const dist = Math.hypot(px - x, pz - z);
+      if (dist > maxDist) continue;
+      const toAng = Math.atan2(-(px - x), -(pz - z));
+      const ang = Math.abs(angleDiff(ry, toAng));
+      if (ang > maxAng) continue; // roughly in front
+      const score = ang + dist * 0.06;
+      if (score < bestScore) {
+        bestScore = score;
+        best = d;
+      }
+    }
+    if (!best) return false;
+    this.state.lockedDoors.push(best.id);
+    this.doorExpiry.set(best.id, Date.now() + DOOR_LOCK_S * 1000);
+    const dpx = best.axis === "v" ? best.line : best.center;
+    const dpz = best.axis === "v" ? best.center : best.line;
+    this.broadcast("sound", { soundId: "door_slam", x: dpx, z: dpz });
+    return true;
+  }
+
+  /** The AI Caretaker works its sabotage tools during a hunt: kills the lights
+   *  when it has a target cornered/fleeing, and slams a door it's bearing down
+   *  on to cut off a runner. Own cooldowns; called from the sim loop. */
+  private aiSabotage(now: number) {
+    const c = this.state.caretaker;
+    const chasing = c.aiState === "chase" || c.aiState === "attack";
+    // Lights-off: strongest while actively chasing (blinds the fleeing searcher).
+    if (chasing && this.state.lightsOutFor <= 0 &&
+        now - this.aiLastLights > CONFIG.HUNTER_BLACKOUT_CD_S * 1000) {
+      this.aiLastLights = now;
+      this.state.lightsOutFor = KILL_LIGHTS_S;
+    }
+    // Door-slam: cut off a runner by slamming a door he's bearing toward. A
+    // wider facing cone than the human's — the AI "commits" to the doorway.
+    if (chasing && now - this.aiLastDoor > CONFIG.HUNTER_DOOR_LOCK_CD_S * 1000) {
+      if (this.lockDoorFacing(c.x, c.z, c.ry, 9, 1.6)) this.aiLastDoor = now;
+    }
   }
 
   /**
