@@ -51,6 +51,7 @@ const CELL = 0.75;
 
 export class NavMap {
   readonly aabbs: AABB[];
+  private readonly wallBoxes: AABB[]; // walls only (for the climb-adjacency check)
   private readonly hx: number;
   private readonly hz: number;
   private readonly nx: number;
@@ -58,14 +59,16 @@ export class NavMap {
   private readonly walk: Uint8Array; // 1 = walkable
 
   constructor() {
+    const toAabb = (b: { x: number; z: number; w: number; d: number }): AABB => ({
+      minX: b.x - b.w / 2,
+      maxX: b.x + b.w / 2,
+      minZ: b.z - b.d / 2,
+      maxZ: b.z + b.d / 2,
+    });
     this.aabbs = [...DEFAULT_MAP.walls, ...DEFAULT_MAP.cover, ...DEFAULT_MAP.stagePlatform, DEFAULT_MAP.barredDoor]
       .filter((b) => b.y - b.h / 2 < 1)
-      .map((b) => ({
-        minX: b.x - b.w / 2,
-        maxX: b.x + b.w / 2,
-        minZ: b.z - b.d / 2,
-        maxZ: b.z + b.d / 2,
-      }));
+      .map(toAabb);
+    this.wallBoxes = DEFAULT_MAP.walls.filter((b) => b.h >= 3).map(toAabb);
 
     this.hx = DEFAULT_MAP.bounds.w / 2;
     this.hz = DEFAULT_MAP.bounds.d / 2;
@@ -107,6 +110,16 @@ export class NavMap {
   losClear(ax: number, az: number, bx: number, bz: number): boolean {
     for (const box of this.aabbs) if (segIntersectsAABB(ax, az, bx, bz, box)) return false;
     return true;
+  }
+
+  /** Is a climbable WALL within `dist` of this point? (visual wall-crawl gate) */
+  nearWall(x: number, z: number, dist: number): boolean {
+    for (const b of this.wallBoxes) {
+      const dx = Math.max(b.minX - x, 0, x - b.maxX);
+      const dz = Math.max(b.minZ - z, 0, z - b.maxZ);
+      if (dx * dx + dz * dz <= dist * dist) return true;
+    }
+    return false;
   }
 
   /** Is this point inside (or within margin of) a solid? */

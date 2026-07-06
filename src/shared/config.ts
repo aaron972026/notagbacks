@@ -99,6 +99,12 @@ export const CONFIG = {
   AI_HEARS_HIDDEN_RADIUS: 2, // hidden-breath leak: passing this close to an occupied locker raises awareness
   AI_GUARD_PAD_THRESHOLD: 2, // once this many items are deposited (exit unlockable), the AI biases toward guarding the back EXIT + its approaches
   AI_ENDGAME_RUSH_MULT: 1.15, // doors-open speed boost (4 → 4.6): closes ground visibly, still loses a clean footrace to a running searcher (6)
+  // Off-screen pressure: when NO searcher is within AI_STALK_RADIUS, the AI
+  // covers ground at a sprint; the moment someone is in range it drops back to
+  // HUNTER_SPEED — players only ever SEE the slow, stalking monster.
+  AI_STALK_RADIUS: 18, // m — inside this, he moves at normal hunter speed
+  AI_ROAM_SPRINT_MULT: 1.6, // out-of-range ground-coverage multiplier (4 → 6.4)
+  AI_CLIMB_CHANCE: 0.55, // chance a patrol/investigate leg is taken ON the walls
   CARETAKER_RADIUS: 0.5,
 
   // ---- Physics / first-person feel (engine-side, not in the design table) ----

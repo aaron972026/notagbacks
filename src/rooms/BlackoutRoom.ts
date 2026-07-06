@@ -82,6 +82,8 @@ export class BlackoutRoom extends Room<GameState> {
   private lastSab = new Map<string, number>();
   /** Last taunt timestamp per player (Caretaker taunt cooldown). */
   private lastTaunt = new Map<string, number>();
+  /** Next time the AI Caretaker taunts on its own (0 = timer not armed yet). */
+  private nextAiTauntAt = 0;
   /** Last drain timestamp per traitor (Drain the Light cooldown). */
   private lastDrain = new Map<string, number>();
   /** Last mark timestamp per traitor (Mark cooldown). */
@@ -771,6 +773,16 @@ export class BlackoutRoom extends Room<GameState> {
           this.emitSting("alert_roar", { x: s.caretaker.x, z: s.caretaker.z });
         }
         this.prevAiState = s.caretaker.aiState;
+        // The AI works the taunt wheel too: an occasional positional growl-line
+        // from wherever he is — the searchers get the same dread a chatty human
+        // Hunter deals out. (First check only arms the timer; no boot-up taunt.)
+        if (now >= this.nextAiTauntAt) {
+          if (this.nextAiTauntAt !== 0 && s.caretaker.active) {
+            const i = Math.floor(Math.random() * (TAUNT_SOUNDS.length - 1)); // skip sting_no
+            this.broadcast("sound", { soundId: TAUNT_SOUNDS[i], x: s.caretaker.x, z: s.caretaker.z });
+          }
+          this.nextAiTauntAt = now + 25_000 + Math.random() * 35_000;
+        }
       }
       this.checkRoundEnd(); // resolves caught / escaped outcomes
     } else if (s.caretaker.active) {

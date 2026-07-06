@@ -35,6 +35,7 @@ export class Caretaker extends Schema {
   @type("number") z = 0;
   @type("number") ry = 0;
   @type("string") aiState = "idle"; // idle | patrol | investigate | chase | search | attack
+  @type("boolean") climbing = false; // prowling ON a wall (visual: wall-crawl)
 }
 
 export class Item extends Schema {

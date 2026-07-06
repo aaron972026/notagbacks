@@ -34,6 +34,8 @@ export class CaretakerAI {
   private guard = false; // endgame: bias toward the back exit + its approaches
   private doorsOpen = false;
   private rushed = false; // the one-shot doors-open sprint has been triggered
+  private nearestPlayerD = Infinity; // distance to the closest live searcher this tick
+  private wantClimb = false; // this patrol/investigate leg is taken ON the walls
 
   constructor(private readonly nav: NavMap) {}
 
@@ -98,10 +100,14 @@ export class CaretakerAI {
     // ---- Perception ----
     let seen: { id: string; x: number; z: number } | null = null;
     let seenD = Infinity;
+    this.nearestPlayerD = Infinity;
     state.players.forEach((p) => {
       if (p.downed) return;
       if (!targetable(p.id)) return; // e.g. the traitor — the Caretaker's ally
       const d = Math.hypot(p.x - me.x, p.z - me.z);
+      // Track the closest live searcher (hidden ones too — they can see out of
+      // lockers, and the off-screen sprint must never be visible to anyone).
+      if (!p.escaped && d < this.nearestPlayerD) this.nearestPlayerD = d;
 
       // Hearing.
       if (!p.hidden) {
@@ -200,6 +206,7 @@ export class CaretakerAI {
       st = "patrol";
       if (!this.patrolTarget || Math.hypot(this.patrolTarget.x - me.x, this.patrolTarget.z - me.z) < 1.5) {
         this.patrolTarget = this.pickPatrol(me);
+        this.wantClimb = Math.random() < CONFIG.AI_CLIMB_CHANCE; // some legs are taken on the walls
       }
       target = this.patrolTarget;
     }
@@ -209,6 +216,15 @@ export class CaretakerAI {
     if (st !== "investigate") this.investigateUntil = 0;
 
     if (target) this.moveToward(c, me, target, dt);
+
+    // Wall-crawl (visual state; pathing stays 2D): on climb-rolled legs he
+    // hugs the walls while patrolling/investigating/searching — never while
+    // chasing or attacking (he drops to close). Only shown when a wall is
+    // actually beside him, so the client can always find a surface to mount.
+    c.climbing =
+      this.wantClimb &&
+      (st === "patrol" || st === "investigate" || st === "search") &&
+      this.nav.nearWall(c.x, c.z, 1.6);
   }
 
   private pickPatrol(me: Pt): Pt {
@@ -217,7 +233,9 @@ export class CaretakerAI {
     // doors are OPEN he never wanders: he paces doorway ↔ corridor choke (always
     // heading for whichever guard point is farther), so approaching searchers see
     // him patrolling the exit and have to time their dash through the gap.
-    if (this.guard && (this.doorsOpen || Math.random() < 0.8)) {
+    // BEFORE the doors open the guard bias is mild (0.35) — he mostly PROWLS the
+    // whole map instead of camping the exit while searchers loot in peace.
+    if (this.guard && (this.doorsOpen || Math.random() < 0.35)) {
       if (this.doorsOpen) {
         return EXIT_GUARD.reduce((a, b) =>
           Math.hypot(a.x - me.x, a.z - me.z) > Math.hypot(b.x - me.x, b.z - me.z) ? a : b,
@@ -252,9 +270,12 @@ export class CaretakerAI {
     const dx = wp.x - me.x;
     const dz = wp.z - me.z;
     const len = Math.hypot(dx, dz) || 1;
-    // Doors open → he hurries (still slower than a running searcher: the race
-    // is winnable, he's just visibly closing).
-    const step = CONFIG.HUNTER_SPEED * (this.doorsOpen ? CONFIG.AI_ENDGAME_RUSH_MULT : 1) * dt;
+    // Speed: normal stalking pace near anyone alive; a ground-coverage SPRINT
+    // when nobody is within AI_STALK_RADIUS (players never see the fast one).
+    // Doors open adds its own urgency; take whichever boost is larger.
+    const offscreen = this.nearestPlayerD > CONFIG.AI_STALK_RADIUS ? CONFIG.AI_ROAM_SPRINT_MULT : 1;
+    const rush = this.doorsOpen ? CONFIG.AI_ENDGAME_RUSH_MULT : 1;
+    const step = CONFIG.HUNTER_SPEED * Math.max(offscreen, rush) * dt;
     const nx = (dx / len) * step;
     const nz = (dz / len) * step;
     const m = CONFIG.CARETAKER_RADIUS;
