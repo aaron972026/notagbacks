@@ -182,6 +182,14 @@ export class BlackoutRoom extends Room<GameState> {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
       this.state.aiHunter = !!msg?.value;
     });
+    this.onMessage("setGlobalVoice", (client, msg: { value?: boolean }) => {
+      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
+      this.state.globalVoice = !!msg?.value;
+    });
+    this.onMessage("setHunterRadar", (client, msg: { value?: boolean }) => {
+      if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
+      this.state.hunterRadar = !!msg?.value;
+    });
     this.onMessage("setPublic", (client, msg: { value?: boolean }) => {
       if (!this.isHost(client) || this.state.phase !== Phase.LOBBY) return;
       this.state.isPublic = !!msg?.value;
@@ -300,6 +308,14 @@ export class BlackoutRoom extends Room<GameState> {
       const next = this.pending.shift()!;
       this.addItem(next.id, next.kind, clamp(msg.x!, -HALF_W, HALF_W), clamp(msg.z!, -HALF_D, HALF_D));
       this.sendPlacement(client);
+    });
+    // Hunter is done hiding early → skip the rest of the HIDE timer. Anything
+    // left unplaced auto-places (same path as the timer running out).
+    this.onMessage("endHide", (client) => {
+      if (this.roles.get(client.sessionId) !== Role.HUNTER) return;
+      if (this.state.phase !== Phase.HIDE) return;
+      this.state.timeLeft = 0;
+      this.advancePhase();
     });
     // Hunter picks a placed item back up during HIDE to reposition it.
     this.onMessage("pickUpItem", (client, msg: { x?: number; z?: number }) => {
@@ -811,6 +827,17 @@ export class BlackoutRoom extends Room<GameState> {
       return;
     }
     p.downed = true;
+    // Drop everything they carried where they fell — the loot must stay
+    // recoverable. A dead carrier otherwise keeps items "in hand" forever:
+    // the deposit quota can become unwinnable, and the client renders the
+    // ghost's flashlight/loot as phantom items.
+    this.state.items.forEach((it) => {
+      if (it.carriedBy === id) {
+        it.carriedBy = "";
+        it.x = p.x;
+        it.z = p.z;
+      }
+    });
     if (!this.caughtOrder.includes(id)) this.caughtOrder.push(id); // Night Report: "The Bait"
   }
 

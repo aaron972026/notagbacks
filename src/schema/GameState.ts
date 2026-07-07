@@ -74,6 +74,8 @@ export class GameState extends Schema {
   @type("boolean") flashlightScarcity = false; // host setting: searchers-1 flashlights (buddy up) vs one each
   @type("boolean") aiHunter = false; // host setting: the AI Caretaker hunts — every human is a searcher (co-op)
   @type("boolean") isPublic = false; // host setting: listed in the public lobby browser
+  @type("boolean") globalVoice = false; // host setting: voice chat is map-wide (no proximity falloff)
+  @type("boolean") hunterRadar = false; // host setting: the Hunter sees searchers on their minimap
   @type("string") dare = ""; // Tonight's Dare (per-round bonus objective id, "" = none)
   @type("string") pickedHunterId = ""; // chosen hunter when hunterMode = pick
   // Host-adjustable per-game timings (seconds).

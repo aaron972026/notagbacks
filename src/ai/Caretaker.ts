@@ -36,6 +36,7 @@ export class CaretakerAI {
   private rushed = false; // the one-shot doors-open sprint has been triggered
   private nearestPlayerD = Infinity; // distance to the closest live searcher this tick
   private wantClimb = false; // this patrol/investigate leg is taken ON the walls
+  private climbStableT = 0; // how long the mount conditions have held (hysteresis)
   private stuckTicks = 0; // consecutive sim ticks with both movement axes blocked
 
   constructor(private readonly nav: NavMap) {}
@@ -225,10 +226,23 @@ export class CaretakerAI {
     // when a wall is actually in reach for the client to mount him on.
     const farChase =
       st === "chase" && target ? Math.hypot(target.x - me.x, target.z - me.z) > 6 : false;
-    c.climbing =
+    // Mount conditions — including NOT near a doorway: nearWall() matches the
+    // jamb walls flanking every door, and crawling through a doorway made the
+    // client flip him wall-to-wall (the spin glitch). He walks doors upright.
+    const wantNow =
       this.wantClimb &&
       (st === "patrol" || st === "investigate" || st === "search" || farChase) &&
-      this.nav.nearWall(c.x, c.z, 2.2);
+      this.nav.nearWall(c.x, c.z, 2.2) &&
+      !this.nav.nearDoor(c.x, c.z);
+    // Hysteresis: dismount instantly (upright is always safe), but only mount
+    // after the conditions hold ~0.4s — kills the on/off flicker at zone edges.
+    if (!wantNow) {
+      c.climbing = false;
+      this.climbStableT = 0;
+    } else {
+      this.climbStableT += dt;
+      if (this.climbStableT >= 0.4) c.climbing = true;
+    }
   }
 
   private pickPatrol(me: Pt): Pt {

@@ -52,6 +52,9 @@ const CELL = 0.75;
 export class NavMap {
   readonly aabbs: AABB[];
   private readonly wallBoxes: AABB[]; // walls only (for the climb-adjacency check)
+  // Doorway openings as rectangles (climb suppression zones): `line` is the wall
+  // plane, `center`/`width` the gap along it. axis "v" = wall at x=line.
+  private readonly doorRects: Array<{ axis: "v" | "h"; line: number; center: number; width: number }>;
   private readonly hx: number;
   private readonly hz: number;
   private readonly nx: number;
@@ -69,6 +72,26 @@ export class NavMap {
       .filter((b) => b.y - b.h / 2 < 1)
       .map(toAabb);
     this.wallBoxes = DEFAULT_MAP.walls.filter((b) => b.h >= 3).map(toAabb);
+    // Doorway openings: the wall-crawl is suppressed while crossing one.
+    // nearWall() matches the jamb walls flanking every doorway, so without this
+    // he'd mount a jamb mid-passage and the pose would flip wall-to-wall (the
+    // spin). Rectangles, NOT radial bubbles: patrol routes run corridors that
+    // pass doors ~1.3m to the side constantly — a radius that covers the
+    // opening would suppress climbing across nearly the whole map.
+    this.doorRects = DEFAULT_MAP.doors.map((d) => ({
+      axis: d.axis,
+      line: d.line,
+      center: d.center,
+      width: d.width,
+    }));
+    // The back-exit gap is carved without a DoorGap entry — cover it too
+    // (a thin box across a horizontal wall: line = z, gap runs along x).
+    this.doorRects.push({
+      axis: "h",
+      line: DEFAULT_MAP.barredDoor.z,
+      center: DEFAULT_MAP.barredDoor.x,
+      width: DEFAULT_MAP.barredDoor.w,
+    });
 
     this.hx = DEFAULT_MAP.bounds.w / 2;
     this.hz = DEFAULT_MAP.bounds.d / 2;
@@ -129,6 +152,21 @@ export class NavMap {
     return true;
   }
 
+  /** Is this point in a doorway crossing zone? (wall-crawl suppressed there.)
+   *  Tight on the through-axis (±1.0 of the wall plane) so it only trips when
+   *  he's actually at the opening — walking a corridor PAST a door in its side
+   *  wall (~1.3m off the plane) keeps the crawl. Padded ±1.6 along the gap so
+   *  crawling ALONG the wall toward the frame dismounts him well before the
+   *  jamb corner (turning the corner into the door mid-crawl spun the pose). */
+  nearDoor(x: number, z: number): boolean {
+    for (const d of this.doorRects) {
+      const perp = d.axis === "v" ? Math.abs(x - d.line) : Math.abs(z - d.line);
+      const along = d.axis === "v" ? Math.abs(z - d.center) : Math.abs(x - d.center);
+      if (perp < 1.0 && along < d.width / 2 + 1.6) return true;
+    }
+    return false;
+  }
+
   /** Is a climbable WALL within `dist` of this point? (visual wall-crawl gate) */
   nearWall(x: number, z: number, dist: number): boolean {
     for (const b of this.wallBoxes) {
@@ -163,7 +201,11 @@ export class NavMap {
 
   /** Waypoints from `from` to `to`: direct if walkable, else smoothed grid A*. */
   path(from: Pt, to: Pt): Pt[] {
-    const m = CONFIG.CARETAKER_RADIUS * 0.9; // body corridor for path smoothing
+    // Body corridor for path smoothing. MUST exceed the body radius: at 0.9×
+    // a smoothed segment could legally pass 0.45 from a door jamb that the
+    // 0.5-radius body can't squeeze past — he'd grind on the frame (the
+    // "stuck in doorways" bug). 1.15× keeps real clearance with slack.
+    const m = CONFIG.CARETAKER_RADIUS * 1.15;
     if (this.losClearM(from.x, from.z, to.x, to.z, m)) return [to];
 
     const [si, sj] = this.nearestWalkable(this.ci(from.x), this.cj(from.z));
