@@ -632,9 +632,8 @@ export class BlackoutRoom extends Room<GameState> {
     }
 
     const searcherCount = ids.filter((id) => this.roles.get(id) !== Role.HUNTER).length;
-    // Objective scales with the team: 1-2 searchers need 2 items, 3+ need all 3 —
-    // the item grind shouldn't dominate a small group's night. (All 3 still spawn.)
-    this.state.requiredItems = searcherCount <= 2 ? 2 : CONFIG.REQUIRED_ITEMS;
+    // Always need all 3 escape items, whatever the team size.
+    this.state.requiredItems = CONFIG.REQUIRED_ITEMS;
     this.state.items.clear();
     // Flashlights: ALWAYS auto-placed in view of the spawn (never Hunter-placed).
     // Default = one per searcher; "buddy-up" scarcity (host option) = one fewer,
