@@ -95,7 +95,7 @@ export const CONFIG = {
   AI_AWARE_INVESTIGATE: 40, // awareness threshold to go investigate
   AI_AWARE_DECAY: 18, // awareness lost per second with no stimulus
   AI_MELEE_COOLDOWN_S: 1.2,
-  AI_MELEE_WINDUP_S: 0.4, // swing wind-up — the player's dodge window (AI spec §8)
+  AI_MELEE_WINDUP_S: 0.75, // swing wind-up — visible rear-back telegraph + the player's dodge window (AI spec §8)
   AI_HEARS_HIDDEN_RADIUS: 2, // hidden-breath leak: passing this close to an occupied locker raises awareness
   AI_GUARD_PAD_THRESHOLD: 2, // once this many items are deposited (exit unlockable), the AI biases toward guarding the back EXIT + its approaches
   AI_ENDGAME_RUSH_MULT: 1.4, // doors-open speed boost (4 → 5.6): closes ground fast, still loses a clean footrace to a running searcher (6)

@@ -236,6 +236,16 @@ export class BlackoutRoom extends Room<GameState> {
       this.clients
         .find((c) => this.roles.get(c.sessionId) === Role.HUNTER)
         ?.send("ping", { x: p.x, z: p.z });
+      // AI Caretaker: a whistle is bait — he locks onto the whistler and chases,
+      // unless he's already committed to someone else.
+      if (this.state.caretaker.active) {
+        this.ai.hearWhistle(
+          client.sessionId,
+          p.x,
+          p.z,
+          (id) => this.roles.get(id) !== Role.TRAITOR,
+        );
+      }
       // Positional: everyone hears WHERE the whistle came from (distance falloff
       // client-side) — it's a location taunt, not a global jingle.
       this.broadcast("whistle", { x: p.x, z: p.z }, { except: client });

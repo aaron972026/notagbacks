@@ -57,6 +57,22 @@ export class CaretakerAI {
     this.reset();
   }
 
+  /** A searcher whistled at (x,z). The Caretaker locks onto them and chases —
+   *  UNLESS he's already committed to chasing someone else (a whistle won't
+   *  pull him off a live target). Taunting an idle/patrolling Caretaker draws
+   *  him straight to you. */
+  hearWhistle(id: string, x: number, z: number, targetable: (id: string) => boolean) {
+    if (!targetable(id)) return; // e.g. the traitor — never his own ally
+    // Already chasing a DIFFERENT, still-valid target → ignore the taunt.
+    if (this.chaseId && this.chaseId !== id) return;
+    if (this.chaseId !== id) this.wantClimb = Math.random() < CONFIG.AI_CLIMB_CHANCE; // fresh chase
+    this.chaseId = id;
+    this.lkp = { x, z };
+    this.awareness = 100;
+    this.lastSeen = this.t; // treat it like a fresh sighting → straight to chase
+    this.searchUntil = 0;
+  }
+
   private reset() {
     this.awareness = 0;
     this.chaseId = null;
