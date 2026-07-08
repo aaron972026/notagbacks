@@ -38,6 +38,12 @@ export class CaretakerAI {
   private wantClimb = false; // this patrol/investigate leg is taken ON the walls
   private climbStableT = 0; // how long the mount conditions have held (hysteresis)
   private stuckTicks = 0; // consecutive sim ticks with both movement axes blocked
+  // Displacement watchdog: catches slide-grinds on jamb corners, where one axis
+  // keeps "moving" microscopically so stuckTicks never fires.
+  private watchX = 0;
+  private watchZ = 0;
+  private progressT = 0;
+  private stuckStrikes = 0;
 
   constructor(private readonly nav: NavMap) {}
 
@@ -240,6 +246,11 @@ export class CaretakerAI {
     // takes the walls while prowling — and even mid-CHASE while he's still
     // closing (he drops to the floor inside strike-approach range). Only shown
     // when a wall is actually in reach for the client to mount him on.
+    // Ground height under him (stage slab/steps): the nav is 2D, the lift is
+    // cosmetic — clients render him at this height so he climbs the stage
+    // instead of wading through it.
+    c.y = this.groundY(c.x, c.z);
+
     const farChase =
       st === "chase" && target ? Math.hypot(target.x - me.x, target.z - me.z) > 6 : false;
     // Mount conditions — including NOT near a doorway: nearWall() matches the
@@ -259,6 +270,17 @@ export class CaretakerAI {
       this.climbStableT += dt;
       if (this.climbStableT >= 0.4) c.climbing = true;
     }
+  }
+
+  /** Walkable surface height at (x,z): the stage slab/steps top, else the floor. */
+  private groundY(x: number, z: number): number {
+    let y = 0;
+    for (const b of DEFAULT_MAP.stagePlatform) {
+      if (Math.abs(x - b.x) <= b.w / 2 && Math.abs(z - b.z) <= b.d / 2) {
+        y = Math.max(y, b.y + b.h / 2);
+      }
+    }
+    return y;
   }
 
   private pickPatrol(me: Pt): Pt {
@@ -336,6 +358,38 @@ export class CaretakerAI {
         this.path = [];
         if (this.chaseId) this.lkp = { x: c.x, z: c.z }; // stop butting the wall mid-chase
       }
+    }
+
+    // Displacement watchdog: sliding along a jamb keeps ONE axis moving, so the
+    // both-axes check above never fires — yet he makes no real progress. If a
+    // full second passes with <0.15 m of net movement while the target is still
+    // far, repath; twice in a row, abandon the leg.
+    const targD = Math.hypot(target.x - me.x, target.z - me.z);
+    this.progressT += dt;
+    if (this.progressT >= 1) {
+      const moved2 = (c.x - this.watchX) ** 2 + (c.z - this.watchZ) ** 2;
+      if (targD > 1.2 && moved2 < 0.15 * 0.15) {
+        this.repathT = 0;
+        this.stuckStrikes++;
+        if (this.stuckStrikes >= 2) {
+          this.stuckStrikes = 0;
+          this.patrolTarget = null;
+          this.path = [];
+          if (this.chaseId) this.lkp = { x: c.x, z: c.z };
+          // Two strikes = repathing didn't free him — he's wedged ON geometry
+          // (both axes permanently blocked). Snap to the nearest walkable nav
+          // cell (≤ one cell, imperceptible in the dark) so he can NEVER stay
+          // stuck, whatever the geometry.
+          const safe = this.nav.unstick(c.x, c.z);
+          c.x = safe.x;
+          c.z = safe.z;
+        }
+      } else {
+        this.stuckStrikes = 0;
+      }
+      this.progressT = 0;
+      this.watchX = c.x;
+      this.watchZ = c.z;
     }
   }
 }

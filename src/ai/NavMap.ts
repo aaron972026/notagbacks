@@ -68,7 +68,10 @@ export class NavMap {
       minZ: b.z - b.d / 2,
       maxZ: b.z + b.d / 2,
     });
-    this.aabbs = [...DEFAULT_MAP.walls, ...DEFAULT_MAP.cover, ...DEFAULT_MAP.stagePlatform, DEFAULT_MAP.barredDoor]
+    // NOTE: stagePlatform is NOT an obstacle — the Caretaker walks the stage
+    // like the players do (its height is cosmetic; Caretaker.groundY lifts the
+    // avatar). Treating it as solid let searchers camp the slab untouchable.
+    this.aabbs = [...DEFAULT_MAP.walls, ...DEFAULT_MAP.cover, DEFAULT_MAP.barredDoor]
       .filter((b) => b.y - b.h / 2 < 1)
       .map(toAabb);
     this.wallBoxes = DEFAULT_MAP.walls.filter((b) => b.h >= 3).map(toAabb);
@@ -152,6 +155,13 @@ export class NavMap {
     return true;
   }
 
+  /** Nearest walkable cell center — an escape hatch for a body wedged on
+   *  geometry (cell centers are guaranteed clear at full body radius). */
+  unstick(x: number, z: number): Pt {
+    const [i, j] = this.nearestWalkable(this.ci(x), this.cj(z));
+    return { x: this.cx(i), z: this.cz(j) };
+  }
+
   /** Is this point in a doorway crossing zone? (wall-crawl suppressed there.)
    *  Tight on the through-axis (±1.0 of the wall plane) so it only trips when
    *  he's actually at the opening — walking a corridor PAST a door in its side
@@ -204,8 +214,10 @@ export class NavMap {
     // Body corridor for path smoothing. MUST exceed the body radius: at 0.9×
     // a smoothed segment could legally pass 0.45 from a door jamb that the
     // 0.5-radius body can't squeeze past — he'd grind on the frame (the
-    // "stuck in doorways" bug). 1.15× keeps real clearance with slack.
-    const m = CONFIG.CARETAKER_RADIUS * 1.15;
+    // "stuck in doorways" bug). 1.3× keeps real clearance with slack — the
+    // axis-decomposed stepper drifts off the smoothed line, so thin margins
+    // still ground on jamb corners occasionally.
+    const m = CONFIG.CARETAKER_RADIUS * 1.3;
     if (this.losClearM(from.x, from.z, to.x, to.z, m)) return [to];
 
     const [si, sj] = this.nearestWalkable(this.ci(from.x), this.cj(from.z));

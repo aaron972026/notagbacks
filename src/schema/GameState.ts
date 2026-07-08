@@ -36,6 +36,8 @@ export class Caretaker extends Schema {
   @type("number") ry = 0;
   @type("string") aiState = "idle"; // idle | patrol | investigate | chase | search | attack
   @type("boolean") climbing = false; // prowling ON a wall (visual: wall-crawl)
+  // APPENDED (schema v3 indexes are positional — never insert mid-class):
+  @type("number") y = 0; // ground height under him (0 floor, 0.9 on the stage slab)
 }
 
 export class Item extends Schema {
